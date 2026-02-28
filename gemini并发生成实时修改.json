@@ -1,0 +1,7 @@
+{
+  "id": "gemini-parallel-live-dev-001",
+  "name": "Gemini并发生成-实时修改",
+  "content": "import 'http://192.168.2.36:5500/初始模板/脚本/gemini并发生成/extracted-gemini-parallel.js'",
+  "info": "Gemini 原生并发补全（Studio/Vertex）实时开发版。\n如本地地址不同，请修改 import 的主机和端口。",
+  "buttons": []
+}
