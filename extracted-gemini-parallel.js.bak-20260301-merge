@@ -1,0 +1,3295 @@
+(() => {
+  'use strict';
+
+  const TAG = '[GeminiParallelSwipe]';
+  const PARALLEL_SOURCES = new Set([
+    'makersuite',
+    'vertexai',
+    'openai',
+    'custom',
+    'openrouter',
+    'azure_openai',
+  ]);
+  const FORCE_SINGLE_FOREGROUND_SOURCES = new Set(['openai', 'custom', 'openrouter', 'azure_openai']);
+  const ALLOWED_TYPES = new Set(['normal', 'regenerate', 'continue']);
+  const CONFIG_KEY = 'gemini_parallel_swipe_config';
+  const STATUS_BAR_STYLE_ID = 'gemini-parallel-status-style';
+  const STATUS_BAR_CLASS = 'gemini-parallel-status-bar';
+  const STATUS_BAR_TEXT_CLASS = 'gemini-parallel-status-text';
+  const STATUS_BAR_TOGGLE_BUTTON_CLASS = 'gemini-parallel-status-toggle-btn';
+  const STATUS_BAR_SETTINGS_BUTTON_CLASS = 'gemini-parallel-status-settings-btn';
+  const STATUS_BAR_DRAGGING_CLASS = 'is-dragging';
+  const STATUS_BAR_COLLAPSED_CLASS = 'is-collapsed';
+  const SETTINGS_PANEL_CLASS = 'gemini-parallel-settings-panel';
+  const SETTINGS_ROW_CLASS = 'gemini-parallel-settings-row';
+  const SETTINGS_STEPPER_CLASS = 'gemini-parallel-settings-stepper';
+  const DEBUG_FLAG_KEY = '__GeminiParallelSwipeDebug';
+  const JOB_PHASES = Object.freeze({
+    armed: 'armed',
+    prefetching: 'prefetching',
+    waiting_target: 'waiting_target',
+    writing: 'writing',
+    done: 'done',
+    aborted: 'aborted',
+    superseded: 'superseded',
+  });
+  const DEFAULT_CONFIG = {
+    enabled: true,
+    max_parallel_cap: 5,
+    retry_count: 5,
+    retry_delay_ms: 1000,
+    min_reply_tokens: 0,
+    status_bar_position: null,
+    status_bar_collapsed: false,
+  };
+  const GENERATE_API_PATH = '/api/backends/chat-completions/generate';
+  const DEFAULT_429_RETRIES = 5;
+  const DEFAULT_429_RETRY_DELAY_MS = 1000;
+  const DEFAULT_MIN_REPLY_TOKENS = 0;
+  const MAX_RETRY_COUNT = 10;
+  const MAX_RETRY_DELAY_MS = 10000;
+  const MAX_MIN_REPLY_TOKENS = 4096;
+  const FETCH_RETRY_SKIP_FLAG = '__gemini_parallel_retry_handled';
+  const FETCH_PATCH_MARKER = '__GeminiParallelSwipeFetchPatched';
+
+  const instanceKey = '__GeminiParallelSwipeInstance';
+  const globalObj = window;
+
+  if (globalObj[instanceKey] && typeof globalObj[instanceKey].destroy === 'function') {
+    try {
+      globalObj[instanceKey].destroy();
+    } catch (error) {
+      console.warn(TAG, '清理旧实例失败:', error);
+    }
+  }
+
+  let config = loadConfig();
+  let patchTimer = null;
+  let domBindTimer = null;
+  let mutationObserver = null;
+  let lastGenerationType = 'normal';
+  let activeJob = null;
+  let jobCounter = 0;
+  let generationSequence = 0;
+  let statusTrackTimer = null;
+  let manualSendLock = false;
+  let isSettingsPopupOpening = false;
+  let statusBarDragState = null;
+  let lastStatusBarToggleAt = 0;
+  let statusBarIgnoreToggleUntil = 0;
+  let retryStatusSeq = 0;
+  let retryStatusKeySeq = 0;
+  let activeForegroundSession = null;
+  let internalGenerateRequestInFlight = 0;
+  const eventStops = [];
+  const domCleanups = [];
+  const fetchPatchCleanups = [];
+  const retryStatusEntries = new Map();
+
+  function log(...args) {
+    console.log(TAG, ...args);
+  }
+
+  function warn(...args) {
+    console.warn(TAG, ...args);
+  }
+
+  function isDebugEnabled() {
+    return window[DEBUG_FLAG_KEY] !== false;
+  }
+
+  function debug(...args) {
+    if (!isDebugEnabled()) return;
+    console.log(TAG, '[debug]', ...args);
+  }
+
+  function summarizeJob(job) {
+    if (!job) return null;
+    return {
+      id: job.id,
+      phase: job.phase,
+      state: job.state,
+      generationType: job.generationType,
+      targetN: job.targetN,
+      extraCount: job.extraCount,
+      messageId: job.messageId,
+      targetMessageId: job.targetMessageId,
+      targetMessageIdFromEvent: job.targetMessageIdFromEvent,
+      foregroundEnded: Boolean(job.foregroundEnded),
+      foregroundStopped: Boolean(job.foregroundStopped),
+      parallelCompleted: Boolean(job.parallelCompleted),
+      superseded: Boolean(job.superseded),
+      aborted: Boolean(job.aborted),
+      progress: job.progress
+        ? {
+            completed: Number(job.progress.completed) || 0,
+            total: Number(job.progress.total) || 0,
+            success: Number(job.progress.success) || 0,
+            failed: Number(job.progress.failed) || 0,
+          }
+        : null,
+      bufferedCount: Array.isArray(job.bufferedTexts) ? job.bufferedTexts.length : 0,
+      flushedCount: Number(job.flushedCount) || 0,
+      writtenCount: Number(job.writtenCount) || 0,
+      writeFailedCount: Number(job.writeFailedCount) || 0,
+      pendingWriteCount: Math.max(
+        0,
+        (Array.isArray(job.bufferedTexts) ? job.bufferedTexts.length : 0) - (Number(job.flushedCount) || 0),
+      ),
+      writeTargetMode: job.writeTarget?.mode || null,
+    };
+  }
+
+  function infoToast(message) {
+    const hostWindow = getHostWindow();
+    if (hostWindow.toastr && typeof hostWindow.toastr.info === 'function') {
+      hostWindow.toastr.info(message, 'Gemini并发生成');
+    }
+  }
+
+  function successToast(message) {
+    const hostWindow = getHostWindow();
+    if (hostWindow.toastr && typeof hostWindow.toastr.success === 'function') {
+      hostWindow.toastr.success(message, 'Gemini并发生成');
+    }
+  }
+
+  function warningToast(message) {
+    const hostWindow = getHostWindow();
+    if (hostWindow.toastr && typeof hostWindow.toastr.warning === 'function') {
+      hostWindow.toastr.warning(message, 'Gemini并发生成');
+    }
+  }
+
+  function errorToast(message) {
+    const hostWindow = getHostWindow();
+    if (hostWindow.toastr && typeof hostWindow.toastr.error === 'function') {
+      hostWindow.toastr.error(message, 'Gemini并发生成');
+    }
+  }
+
+  function getHostWindow() {
+    try {
+      if (window.parent && window.parent !== window) {
+        return window.parent;
+      }
+    } catch {
+      // ignore
+    }
+    return window;
+  }
+
+  function getHostDocument() {
+    const hostWindow = getHostWindow();
+    if (hostWindow && hostWindow.document) {
+      return hostWindow.document;
+    }
+    return document;
+  }
+
+  function getChatContainer() {
+    return getHostDocument().querySelector('#chat');
+  }
+
+  function ensureStatusBarStyle() {
+    const hostDocument = getHostDocument();
+    if (!hostDocument) return false;
+    const cssText = `
+      .${STATUS_BAR_CLASS} {
+        position: fixed;
+        left: 50%;
+        bottom: 6px;
+        transform: translateX(-50%);
+        display: inline-flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        width: max-content;
+        max-width: calc(100% - 20px);
+        margin: 0;
+        min-height: 28px;
+        padding: 3px 12px;
+        border-radius: 999px;
+        background: rgba(18, 20, 26, 0.88);
+        border: 1px solid rgba(255, 255, 255, 0.24);
+        color: #f5f7fa;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.2;
+        letter-spacing: 0.2px;
+        text-shadow: none;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        pointer-events: auto;
+        opacity: 1;
+        backdrop-filter: blur(2px);
+        box-shadow: 0 1px 8px rgba(0, 0, 0, 0.35);
+        z-index: 2147483646;
+        touch-action: none;
+        user-select: none;
+        cursor: grab;
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_DRAGGING_CLASS} {
+        cursor: grabbing;
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} {
+        min-width: 30px;
+        max-width: 30px;
+        width: 30px;
+        padding: 3px;
+        gap: 0;
+        justify-content: center;
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} .${STATUS_BAR_TEXT_CLASS},
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} .${STATUS_BAR_SETTINGS_BUTTON_CLASS} {
+        display: none;
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} .${STATUS_BAR_TOGGLE_BUTTON_CLASS} {
+        pointer-events: none;
+      }
+
+      .${STATUS_BAR_TOGGLE_BUTTON_CLASS} {
+        flex: 0 0 auto;
+        width: 22px;
+        min-width: 22px;
+        height: 22px;
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        background: rgba(255, 255, 255, 0.08);
+        color: #f5f7fa;
+        font-size: 12px;
+        font-weight: 700;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        line-height: 1;
+        cursor: pointer;
+      }
+
+      .${STATUS_BAR_TOGGLE_BUTTON_CLASS}:hover {
+        background: rgba(255, 255, 255, 0.16);
+      }
+
+      .${STATUS_BAR_TEXT_CLASS} {
+        display: inline-block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .${STATUS_BAR_SETTINGS_BUTTON_CLASS} {
+        flex: 0 0 auto;
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        background: rgba(255, 255, 255, 0.08);
+        color: #f5f7fa;
+        font-size: 11px;
+        font-weight: 600;
+        border-radius: 999px;
+        padding: 2px 10px;
+        min-height: 22px;
+        display: inline-flex;
+        align-items: center;
+        line-height: 1.3;
+        cursor: pointer;
+      }
+
+      .${STATUS_BAR_SETTINGS_BUTTON_CLASS}:hover {
+        background: rgba(255, 255, 255, 0.16);
+      }
+
+      .${SETTINGS_PANEL_CLASS} {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        min-width: 280px;
+        color: var(--SmartThemeBodyColor, inherit);
+      }
+
+      .${SETTINGS_ROW_CLASS} {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+      }
+
+      .${SETTINGS_ROW_CLASS} > label {
+        font-weight: 600;
+        color: var(--SmartThemeBodyColor, inherit);
+      }
+
+      .${SETTINGS_ROW_CLASS} input[type='number'] {
+        width: 120px;
+        height: 34px;
+        padding: 4px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.28));
+        background: var(--SmartThemeBlurTintColor, rgba(20, 24, 32, 0.92));
+        color: var(--SmartThemeBodyColor, #f5f7fa);
+        caret-color: var(--SmartThemeBodyColor, #f5f7fa);
+        font-size: 16px;
+        font-weight: 600;
+        line-height: 1.2;
+        text-align: left;
+        box-sizing: border-box;
+      }
+
+      .${SETTINGS_ROW_CLASS} input[type='number']::placeholder {
+        color: var(--SmartThemeQuoteColor, rgba(245, 247, 250, 0.55));
+      }
+
+      .${SETTINGS_ROW_CLASS} input[type='number']:focus {
+        outline: none;
+        border-color: var(--SmartThemeEmColor, rgba(126, 180, 255, 0.9));
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--SmartThemeEmColor, #7eb4ff) 24%, transparent);
+      }
+
+      .${SETTINGS_STEPPER_CLASS} {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .${SETTINGS_STEPPER_CLASS} > button {
+        min-width: 28px;
+        height: 28px;
+        border-radius: 6px;
+        border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.28));
+        background: var(--SmartThemeBlurTintColor, rgba(255, 255, 255, 0.08));
+        color: var(--SmartThemeBodyColor, inherit);
+        cursor: pointer;
+      }
+
+      .${SETTINGS_STEPPER_CLASS} > button:hover {
+        background: color-mix(in srgb, var(--SmartThemeEmColor, #7eb4ff) 16%, var(--SmartThemeBlurTintColor, rgba(255, 255, 255, 0.08)));
+      }
+    `;
+
+    const existing = hostDocument.getElementById(STATUS_BAR_STYLE_ID);
+    if (existing) {
+      if (existing.textContent !== cssText) {
+        existing.textContent = cssText;
+      }
+      return true;
+    }
+
+    const style = hostDocument.createElement('style');
+    style.id = STATUS_BAR_STYLE_ID;
+    style.textContent = cssText;
+
+    const target = hostDocument.head || hostDocument.body;
+    if (!target) return false;
+    target.appendChild(style);
+    return true;
+  }
+
+  function removeStatusBarStyle() {
+    const hostDocument = getHostDocument();
+    if (!hostDocument) return;
+    const style = hostDocument.getElementById(STATUS_BAR_STYLE_ID);
+    if (style) {
+      style.remove();
+    }
+  }
+
+  function removeParallelStatusBar() {
+    const hostDocument = getHostDocument();
+    if (!hostDocument) return false;
+    clearStatusBarDragState();
+    const bar = hostDocument.querySelector(`.${STATUS_BAR_CLASS}`);
+    if (!bar) return false;
+    bar.remove();
+    return true;
+  }
+
+  function removeAllParallelStatusBars() {
+    const hostDocument = getHostDocument();
+    if (!hostDocument) return;
+    clearStatusBarDragState();
+    const bars = hostDocument.querySelectorAll(`.${STATUS_BAR_CLASS}`);
+    bars.forEach(bar => bar.remove());
+  }
+
+  function buildIdleStatusText() {
+    const enabledState = config.enabled ? '空闲' : '已禁用';
+    const retryCount = getConfiguredRetryCount();
+    const retryDelayMs = getConfiguredRetryDelayMs();
+    const minReplyTokens = getConfiguredMinReplyTokens();
+    return `并发补全 ${enabledState} · 重试 ${retryCount} 次 · 延迟 ${retryDelayMs}ms · 最小 ${minReplyTokens} token`;
+  }
+
+  function resolvePopupApi() {
+    const context = getContext();
+    const hostWindow = getHostWindow();
+    const popupHost = context || hostWindow?.SillyTavern || window.SillyTavern || {};
+    const popupFn = typeof popupHost.callGenericPopup === 'function' ? popupHost.callGenericPopup : null;
+    const popupType = popupHost.POPUP_TYPE || null;
+    const popupResult = popupHost.POPUP_RESULT || null;
+    return { popupFn, popupType, popupResult };
+  }
+
+  function isPopupAffirmative(result, popupResult) {
+    if (result === true) return true;
+    if (typeof result === 'number' && Number.isFinite(result)) {
+      if (popupResult && Number(result) === Number(popupResult.AFFIRMATIVE)) return true;
+      if (Number(result) === 1) return true;
+    }
+    if (typeof result === 'string' && result.trim().toLowerCase() === 'true') return true;
+    return false;
+  }
+
+  async function openSettingsPopup() {
+    if (isSettingsPopupOpening) return;
+    isSettingsPopupOpening = true;
+    try {
+      const { popupFn, popupType, popupResult } = resolvePopupApi();
+      if (!popupFn || !popupType) {
+        warningToast('当前环境不支持弹窗设置');
+        return;
+      }
+
+      const hostDocument = getHostDocument();
+      const panel = hostDocument.createElement('div');
+      panel.className = SETTINGS_PANEL_CLASS;
+
+      const title = hostDocument.createElement('div');
+      title.textContent = '并发重试设置';
+      title.style.fontWeight = '700';
+      panel.appendChild(title);
+
+      const retryRow = hostDocument.createElement('div');
+      retryRow.className = SETTINGS_ROW_CLASS;
+      const retryLabel = hostDocument.createElement('label');
+      retryLabel.textContent = '重试次数';
+      const retryStepper = hostDocument.createElement('div');
+      retryStepper.className = SETTINGS_STEPPER_CLASS;
+      const retryDec = hostDocument.createElement('button');
+      retryDec.type = 'button';
+      retryDec.textContent = '-';
+      const retryValue = hostDocument.createElement('span');
+      retryValue.textContent = String(getConfiguredRetryCount());
+      retryValue.style.minWidth = '30px';
+      retryValue.style.textAlign = 'center';
+      const retryInc = hostDocument.createElement('button');
+      retryInc.type = 'button';
+      retryInc.textContent = '+';
+      retryStepper.append(retryDec, retryValue, retryInc);
+      retryRow.append(retryLabel, retryStepper);
+      panel.appendChild(retryRow);
+
+      const delayRow = hostDocument.createElement('div');
+      delayRow.className = SETTINGS_ROW_CLASS;
+      const delayLabel = hostDocument.createElement('label');
+      delayLabel.textContent = '重试延迟(ms)';
+      const delayInput = hostDocument.createElement('input');
+      delayInput.type = 'number';
+      delayInput.min = '0';
+      delayInput.max = String(MAX_RETRY_DELAY_MS);
+      delayInput.step = '100';
+      delayInput.value = String(getConfiguredRetryDelayMs());
+      delayRow.append(delayLabel, delayInput);
+      panel.appendChild(delayRow);
+
+      const minTokenRow = hostDocument.createElement('div');
+      minTokenRow.className = SETTINGS_ROW_CLASS;
+      const minTokenLabel = hostDocument.createElement('label');
+      minTokenLabel.textContent = '最小回复长度(token)';
+      const minTokenInput = hostDocument.createElement('input');
+      minTokenInput.type = 'number';
+      minTokenInput.min = '0';
+      minTokenInput.max = String(MAX_MIN_REPLY_TOKENS);
+      minTokenInput.step = '1';
+      minTokenInput.value = String(getConfiguredMinReplyTokens());
+      minTokenRow.append(minTokenLabel, minTokenInput);
+      panel.appendChild(minTokenRow);
+
+      const hint = hostDocument.createElement('div');
+      hint.textContent = '说明：最小回复长度为 0 时表示关闭长度重试。';
+      hint.style.opacity = '0.8';
+      hint.style.fontSize = '12px';
+      panel.appendChild(hint);
+
+      const adjustRetryValue = (delta) => {
+        const current = clampRetryCount(Number(retryValue.textContent) || 0);
+        const next = clampRetryCount(current + delta);
+        retryValue.textContent = String(next);
+      };
+      retryDec.addEventListener('click', () => adjustRetryValue(-1));
+      retryInc.addEventListener('click', () => adjustRetryValue(1));
+
+      const result = await popupFn(panel, popupType.CONFIRM, '', {
+        okButton: '保存',
+        cancelButton: '取消',
+        wider: true,
+        leftAlign: true,
+        allowVerticalScrolling: true,
+      });
+      if (!isPopupAffirmative(result, popupResult)) {
+        return;
+      }
+
+      const nextRetryCount = clampRetryCount(Number(retryValue.textContent));
+      const nextRetryDelayMs = clampRetryDelayMs(Number(delayInput.value));
+      const nextMinReplyTokens = clampMinReplyTokens(Number(minTokenInput.value));
+
+      config = normalizeConfig({
+        ...config,
+        retry_count: nextRetryCount,
+        retry_delay_ms: nextRetryDelayMs,
+        min_reply_tokens: nextMinReplyTokens,
+      });
+      saveConfig();
+      refreshStatusBarForRetryState();
+      successToast('重试设置已保存');
+    } catch (error) {
+      warn('打开设置弹窗失败:', error);
+      errorToast('设置弹窗打开失败');
+    } finally {
+      isSettingsPopupOpening = false;
+    }
+  }
+
+  function onStatusBarSettingsButtonClick(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    void openSettingsPopup();
+  }
+
+  function isStatusBarCollapsed() {
+    return Boolean(config?.status_bar_collapsed);
+  }
+
+  function applyStatusBarCollapsedState(bar, collapsed) {
+    if (!isDomElement(bar)) return;
+    const textNode = bar.querySelector(`.${STATUS_BAR_TEXT_CLASS}`);
+    const settingsButton = bar.querySelector(`.${STATUS_BAR_SETTINGS_BUTTON_CLASS}`);
+    bar.classList.toggle(STATUS_BAR_COLLAPSED_CLASS, collapsed);
+
+    if (collapsed) {
+      bar.style.minWidth = '30px';
+      bar.style.maxWidth = '30px';
+      bar.style.width = '30px';
+      bar.style.padding = '3px';
+      bar.style.gap = '0';
+      bar.style.justifyContent = 'center';
+      if (isDomElement(textNode)) textNode.style.display = 'none';
+      if (isDomElement(settingsButton)) settingsButton.style.display = 'none';
+      return;
+    }
+
+    bar.style.minWidth = '';
+    bar.style.maxWidth = '';
+    bar.style.width = '';
+    bar.style.padding = '';
+    bar.style.gap = '';
+    bar.style.justifyContent = '';
+    if (isDomElement(textNode)) textNode.style.display = '';
+    if (isDomElement(settingsButton)) settingsButton.style.display = '';
+  }
+
+  function shouldSkipDuplicateStatusBarToggle() {
+    const now = Date.now();
+    if (now - lastStatusBarToggleAt < 220) {
+      return true;
+    }
+    lastStatusBarToggleAt = now;
+    return false;
+  }
+
+  function resolveStatusBarFromEvent(event) {
+    const target = getEventTargetElement(event);
+    if (!isDomElement(target) || typeof target.closest !== 'function') return null;
+    const bar = target.closest(`.${STATUS_BAR_CLASS}`);
+    return isDomElement(bar) ? bar : null;
+  }
+
+  function toggleStatusBarCollapsed(event) {
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    if (Date.now() < statusBarIgnoreToggleUntil) return;
+    if (shouldSkipDuplicateStatusBarToggle()) return;
+
+    const nextCollapsed = !isStatusBarCollapsed();
+    config = normalizeConfig({
+      ...config,
+      status_bar_collapsed: nextCollapsed,
+    });
+    const bar = resolveStatusBarFromEvent(event);
+    if (isDomElement(bar)) {
+      applyStatusBarCollapsedState(bar, nextCollapsed);
+    }
+    saveConfig();
+    refreshStatusBarForRetryState();
+  }
+
+  function onStatusBarToggleButtonClick(event) {
+    toggleStatusBarCollapsed(event);
+  }
+
+  function onStatusBarToggleButtonTouchEnd(event) {
+    onStatusBarToggleButtonClick(event);
+  }
+
+  function onStatusBarToggleButtonPointerUp(event) {
+    onStatusBarToggleButtonClick(event);
+  }
+
+  function onStatusBarContainerClick(event) {
+    if (!isStatusBarCollapsed()) return;
+    toggleStatusBarCollapsed(event);
+  }
+
+  function normalizeStatusBarPosition(position) {
+    if (!position || typeof position !== 'object') return null;
+    const left = Number(position.left);
+    const top = Number(position.top);
+    if (!Number.isFinite(left) || !Number.isFinite(top)) return null;
+    return { left: Math.round(left), top: Math.round(top) };
+  }
+
+  function isDomElement(node) {
+    return Boolean(node && typeof node === 'object' && node.nodeType === 1);
+  }
+
+  function getEventTargetElement(event) {
+    const target = event?.target;
+    if (isDomElement(target)) return target;
+    const parent = target && typeof target === 'object' ? target.parentElement : null;
+    return isDomElement(parent) ? parent : null;
+  }
+
+  function unbindStatusBarDragDocEvents(doc) {
+    if (!doc || typeof doc.removeEventListener !== 'function') return;
+    doc.removeEventListener('pointermove', onStatusBarPointerMove);
+    doc.removeEventListener('pointerup', finalizeStatusBarDrag);
+    doc.removeEventListener('pointercancel', finalizeStatusBarDrag);
+  }
+
+  function clearStatusBarDragState() {
+    const dragState = statusBarDragState;
+    if (!dragState) return;
+
+    statusBarDragState = null;
+    unbindStatusBarDragDocEvents(dragState.doc);
+
+    const bar = dragState.bar;
+    if (!isDomElement(bar)) return;
+    bar.classList.remove(STATUS_BAR_DRAGGING_CLASS);
+    try {
+      if (typeof bar.releasePointerCapture === 'function') {
+        bar.releasePointerCapture(dragState.pointerId);
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  function applyDefaultStatusBarPosition(bar) {
+    if (!bar) return;
+    const hostWindow = getHostWindow();
+    if (!hostWindow) return;
+
+    const rect = bar.getBoundingClientRect();
+    const chat = getChatContainer();
+    const gap = 8;
+
+    if (chat && typeof chat.getBoundingClientRect === 'function') {
+      const chatRect = chat.getBoundingClientRect();
+      const left = chatRect.left + (chatRect.width - rect.width) / 2;
+      const topBelow = chatRect.bottom + gap;
+      const hasSpaceBelow = topBelow + rect.height <= hostWindow.innerHeight;
+      const top = hasSpaceBelow ? topBelow : (chatRect.bottom - rect.height - 6);
+      setStatusBarPosition(bar, left, top);
+      return;
+    }
+
+    const fallbackLeft = (hostWindow.innerWidth - rect.width) / 2;
+    const fallbackTop = hostWindow.innerHeight - rect.height - 6;
+    setStatusBarPosition(bar, fallbackLeft, fallbackTop);
+  }
+
+  function setStatusBarPosition(bar, left, top, options = {}) {
+    if (!bar) return null;
+    const hostWindow = getHostWindow();
+    if (!hostWindow || !Number.isFinite(left) || !Number.isFinite(top)) return null;
+
+    const rect = bar.getBoundingClientRect();
+    const maxLeft = Math.max(0, Math.floor(hostWindow.innerWidth - rect.width));
+    const maxTop = Math.max(0, Math.floor(hostWindow.innerHeight - rect.height));
+    const clampedLeft = Math.min(maxLeft, Math.max(0, Math.round(left)));
+    const clampedTop = Math.min(maxTop, Math.max(0, Math.round(top)));
+
+    bar.style.left = `${clampedLeft}px`;
+    bar.style.top = `${clampedTop}px`;
+    bar.style.bottom = 'auto';
+    bar.style.transform = 'none';
+
+    if (options.persist) {
+      config = normalizeConfig({
+        ...config,
+        status_bar_position: { left: clampedLeft, top: clampedTop },
+      });
+      saveConfig();
+    }
+    return { left: clampedLeft, top: clampedTop };
+  }
+
+  function applySavedStatusBarPosition(bar) {
+    const saved = normalizeStatusBarPosition(config?.status_bar_position);
+    if (!saved) {
+      applyDefaultStatusBarPosition(bar);
+      return;
+    }
+
+    const next = setStatusBarPosition(bar, saved.left, saved.top);
+    if (!next) {
+      applyDefaultStatusBarPosition(bar);
+      return;
+    }
+
+    if (next.left !== saved.left || next.top !== saved.top) {
+      config = normalizeConfig({
+        ...config,
+        status_bar_position: next,
+      });
+      saveConfig();
+    }
+  }
+
+  function onStatusBarPointerDown(event) {
+    const bar = event.currentTarget;
+    if (!isDomElement(bar)) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const target = getEventTargetElement(event);
+    if (
+      isDomElement(target)
+      && typeof target.closest === 'function'
+      && (
+        target.tagName === 'BUTTON'
+        || target.closest('button')
+        || target.closest(`.${STATUS_BAR_SETTINGS_BUTTON_CLASS}, .${STATUS_BAR_TOGGLE_BUTTON_CLASS}`)
+      )
+    ) {
+      return;
+    }
+
+    clearStatusBarDragState();
+
+    const doc = bar.ownerDocument || getHostDocument();
+    if (!doc || typeof doc.addEventListener !== 'function') return;
+
+    const rect = bar.getBoundingClientRect();
+    setStatusBarPosition(bar, rect.left, rect.top);
+    statusBarDragState = {
+      bar,
+      doc,
+      pointerId: event.pointerId,
+      offsetX: event.clientX - rect.left,
+      offsetY: event.clientY - rect.top,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      moved: false,
+    };
+
+    bar.classList.add(STATUS_BAR_DRAGGING_CLASS);
+    try {
+      if (typeof bar.setPointerCapture === 'function') {
+        bar.setPointerCapture(event.pointerId);
+      }
+    } catch {
+      // ignore
+    }
+    doc.addEventListener('pointermove', onStatusBarPointerMove, { passive: false });
+    doc.addEventListener('pointerup', finalizeStatusBarDrag);
+    doc.addEventListener('pointercancel', finalizeStatusBarDrag);
+    event.preventDefault();
+  }
+
+  function onStatusBarPointerMove(event) {
+    const dragState = statusBarDragState;
+    if (!dragState) return;
+    if (dragState.pointerId !== event.pointerId) return;
+    const bar = dragState.bar;
+    if (!isDomElement(bar)) return;
+
+    const left = event.clientX - dragState.offsetX;
+    const top = event.clientY - dragState.offsetY;
+    setStatusBarPosition(bar, left, top);
+
+    if (!dragState.moved) {
+      const movedX = Math.abs(event.clientX - dragState.startClientX);
+      const movedY = Math.abs(event.clientY - dragState.startClientY);
+      if (movedX > 2 || movedY > 2) {
+        dragState.moved = true;
+      }
+    }
+    event.preventDefault();
+  }
+
+  function finalizeStatusBarDrag(event) {
+    const dragState = statusBarDragState;
+    if (!dragState) return;
+    if (event && dragState.pointerId !== event.pointerId) return;
+
+    const bar = dragState.bar;
+    const shouldPersist = Boolean(dragState.moved);
+    if (shouldPersist) {
+      statusBarIgnoreToggleUntil = Date.now() + 320;
+    }
+    clearStatusBarDragState();
+    if (!shouldPersist || !isDomElement(bar)) return;
+
+    const rect = bar.getBoundingClientRect();
+    setStatusBarPosition(bar, rect.left, rect.top, { persist: true });
+  }
+
+  function ensureStatusBarElement() {
+    const hostDocument = getHostDocument();
+    if (!hostDocument) return null;
+    const body = hostDocument.body;
+    if (!body) return null;
+
+    const bars = Array.from(hostDocument.querySelectorAll(`.${STATUS_BAR_CLASS}`));
+    if (bars.length > 1) {
+      bars.slice(1).forEach((node) => node.remove());
+    }
+
+    let bar = bars[0] || null;
+    const isNewBar = !bar;
+    if (!bar) {
+      bar = hostDocument.createElement('div');
+      bar.className = STATUS_BAR_CLASS;
+    }
+
+    bar.removeEventListener('pointerdown', onStatusBarPointerDown);
+    bar.addEventListener('pointerdown', onStatusBarPointerDown);
+    bar.removeEventListener('click', onStatusBarContainerClick);
+    bar.addEventListener('click', onStatusBarContainerClick);
+
+    let toggleButton = bar.querySelector(`.${STATUS_BAR_TOGGLE_BUTTON_CLASS}`);
+    if (!toggleButton) {
+      toggleButton = hostDocument.createElement('button');
+    }
+    toggleButton.type = 'button';
+    toggleButton.className = STATUS_BAR_TOGGLE_BUTTON_CLASS;
+    toggleButton.textContent = '✦';
+    toggleButton.setAttribute('aria-label', '最小化状态栏');
+    toggleButton.removeEventListener('click', onStatusBarToggleButtonClick);
+    toggleButton.addEventListener('click', onStatusBarToggleButtonClick);
+    toggleButton.removeEventListener('pointerup', onStatusBarToggleButtonPointerUp);
+    toggleButton.addEventListener('pointerup', onStatusBarToggleButtonPointerUp);
+    toggleButton.removeEventListener('touchend', onStatusBarToggleButtonTouchEnd);
+    toggleButton.addEventListener('touchend', onStatusBarToggleButtonTouchEnd, { passive: false });
+
+    let textNode = bar.querySelector(`.${STATUS_BAR_TEXT_CLASS}`);
+    if (!textNode) {
+      textNode = hostDocument.createElement('span');
+      textNode.className = STATUS_BAR_TEXT_CLASS;
+    }
+
+    let settingsButton = bar.querySelector(`.${STATUS_BAR_SETTINGS_BUTTON_CLASS}`);
+    if (!settingsButton) {
+      settingsButton = hostDocument.createElement('button');
+    }
+    settingsButton.type = 'button';
+    settingsButton.className = STATUS_BAR_SETTINGS_BUTTON_CLASS;
+    settingsButton.textContent = '设置';
+    settingsButton.removeEventListener('click', onStatusBarSettingsButtonClick);
+    settingsButton.addEventListener('click', onStatusBarSettingsButtonClick);
+
+    bar.replaceChildren(toggleButton, textNode, settingsButton);
+
+    if (bar.parentElement !== body) {
+      body.appendChild(bar);
+    }
+    if (isNewBar) {
+      applySavedStatusBarPosition(bar);
+    }
+    return bar;
+  }
+
+  function renderParallelStatusBar(text) {
+    if (!ensureStatusBarStyle()) {
+      warn('并发状态栏样式注入失败，已跳过本次状态显示');
+      return false;
+    }
+
+    const bar = ensureStatusBarElement();
+    if (!bar) {
+      warn('找不到 body，无法渲染并发状态栏');
+      return false;
+    }
+
+    const toggleButton = bar.querySelector(`.${STATUS_BAR_TOGGLE_BUTTON_CLASS}`);
+    const textNode = bar.querySelector(`.${STATUS_BAR_TEXT_CLASS}`) || bar;
+    const settingsButton = bar.querySelector(`.${STATUS_BAR_SETTINGS_BUTTON_CLASS}`);
+    const isCollapsed = isStatusBarCollapsed();
+    applyStatusBarCollapsedState(bar, isCollapsed);
+    if (toggleButton) {
+      const actionText = isCollapsed ? '展开状态栏' : '最小化为图标';
+      toggleButton.title = actionText;
+      toggleButton.setAttribute('aria-label', actionText);
+    }
+    if (settingsButton) {
+      settingsButton.title = '打开设置';
+    }
+    const normalizedText = String(text || '').trim();
+    const nextText = normalizedText || buildIdleStatusText();
+    if (textNode.textContent !== nextText) {
+      textNode.textContent = nextText;
+    }
+    if (!statusBarDragState && !normalizeStatusBarPosition(config?.status_bar_position)) {
+      applyDefaultStatusBarPosition(bar);
+    }
+    return true;
+  }
+
+  function createRetryStatusKey(prefix = 'retry') {
+    retryStatusKeySeq += 1;
+    return `${prefix}-${retryStatusKeySeq}`;
+  }
+
+  function getLatestRetryStatusEntry() {
+    let latest = null;
+    retryStatusEntries.forEach((entry) => {
+      if (!latest || Number(entry.seq) > Number(latest.seq)) {
+        latest = entry;
+      }
+    });
+    return latest;
+  }
+
+  function buildRetryStatusText() {
+    if (retryStatusEntries.size === 0) return '';
+    const latest = getLatestRetryStatusEntry();
+    if (!latest) return '';
+
+    const attempt = Number(latest.attempt) || 0;
+    const maxRetries = Number(latest.maxRetries) || getConfiguredRetryCount();
+    const reason = String(latest.reason || '429').trim() || '429';
+    const scope = String(latest.scope || '请求');
+    const concurrentCount = retryStatusEntries.size;
+    const concurrentSuffix = concurrentCount > 1 ? ` · 并行 ${concurrentCount}` : '';
+    return `${reason}重试 ${attempt}/${maxRetries} · ${scope}${concurrentSuffix}`;
+  }
+
+  function refreshStatusBarForRetryState() {
+    if (activeJob && !isJobTerminal(activeJob) && !activeJob.aborted) {
+      syncJobStatusBar(activeJob);
+      return;
+    }
+
+    const retryText = buildRetryStatusText();
+    if (retryText) {
+      renderParallelStatusBar(retryText);
+    } else {
+      renderParallelStatusBar(buildIdleStatusText());
+    }
+  }
+
+  function setRetryStatusEntry(key, entry) {
+    if (!key || !entry || typeof entry !== 'object') return;
+    retryStatusSeq += 1;
+    retryStatusEntries.set(key, {
+      ...entry,
+      seq: retryStatusSeq,
+    });
+    refreshStatusBarForRetryState();
+  }
+
+  function clearRetryStatusEntry(key) {
+    if (!key) return;
+    const removed = retryStatusEntries.delete(key);
+    if (removed) {
+      refreshStatusBarForRetryState();
+    }
+  }
+
+  function buildParallelStatusText(progress) {
+    const completed = Number(progress?.completed) || 0;
+    const total = Number(progress?.total) || 0;
+    const success = Number(progress?.success) || 0;
+    const failed = Number(progress?.failed) || 0;
+    const baseText = `并发补全 进行中 ${completed}/${total} · 成功 ${success} · 失败 ${failed}`;
+    const retryText = buildRetryStatusText();
+    return retryText ? `${baseText} · ${retryText}` : baseText;
+  }
+
+  function updateParallelStatusBar(job, progress) {
+    if (!job) return false;
+    const text = buildParallelStatusText(progress);
+    return renderParallelStatusBar(text);
+  }
+
+  function removeJobStatusBar() {
+    return renderParallelStatusBar(buildIdleStatusText());
+  }
+
+  function syncJobStatusBar(job) {
+    if (!job || job.aborted) return false;
+    const progress = job.progress || {
+      completed: 0,
+      total: job.extraCount,
+      success: 0,
+      failed: 0,
+    };
+    return updateParallelStatusBar(job, progress);
+  }
+
+  function stopStatusBarTracker() {
+    if (statusTrackTimer) {
+      clearInterval(statusTrackTimer);
+      statusTrackTimer = null;
+    }
+  }
+
+  function startStatusBarTracker(job) {
+    stopStatusBarTracker();
+    if (!job) return;
+
+    syncJobStatusBar(job);
+    statusTrackTimer = setInterval(() => {
+      if (!activeJob || activeJob.id !== job.id || job.aborted) {
+        stopStatusBarTracker();
+        return;
+      }
+      syncJobStatusBar(job);
+    }, 120);
+  }
+
+  function setJobPhase(job, phase) {
+    if (!job) return;
+    const previousPhase = job.phase;
+    job.phase = phase;
+    job.state = phase;
+    debug('任务阶段变更', {
+      jobId: job.id,
+      from: previousPhase,
+      to: phase,
+      generationType: job.generationType,
+    });
+  }
+
+  function isJobTerminal(job) {
+    if (!job) return true;
+    return job.phase === JOB_PHASES.done
+      || job.phase === JOB_PHASES.aborted
+      || job.phase === JOB_PHASES.superseded;
+  }
+
+  function abortJobControllers(job) {
+    if (!job || !Array.isArray(job.controllers)) return;
+    for (const controller of job.controllers) {
+      try {
+        controller.abort();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  function abortActiveJob(reason) {
+    const job = activeJob;
+    abortForegroundValidation(reason || 'abortActiveJob');
+    if (!job) {
+      debug('请求中止任务，但当前无 activeJob', { reason });
+      stopStatusBarTracker();
+      refreshStatusBarForRetryState();
+      return;
+    }
+
+    if (isJobTerminal(job)) {
+      debug('请求中止任务，但任务已结束', { reason, job: summarizeJob(job) });
+      clearActiveJobIfMatch(job);
+      return;
+    }
+
+    debug('中止并发任务', { reason, job: summarizeJob(job) });
+    job.aborted = true;
+    job.abortReason = String(reason || 'aborted');
+    setJobPhase(job, JOB_PHASES.aborted);
+    abortJobControllers(job);
+    clearActiveJobIfMatch(job);
+  }
+
+  function supersedeActiveJob(reason) {
+    const job = activeJob;
+    abortForegroundValidation(reason || 'supersedeActiveJob');
+    if (!job || isJobTerminal(job)) {
+      debug('请求废弃任务，但无可废弃任务', { reason, hasJob: Boolean(job) });
+      return false;
+    }
+
+    debug('废弃并发任务', { reason, job: summarizeJob(job) });
+    job.superseded = true;
+    job.supersededReason = String(reason || '会话已进入下一轮');
+    job.aborted = true;
+    setJobPhase(job, JOB_PHASES.superseded);
+    abortJobControllers(job);
+    warningToast(`并发结果已丢弃：${job.supersededReason}`);
+    clearActiveJobIfMatch(job);
+    return true;
+  }
+
+  function getContext() {
+    const hostWindow = getHostWindow();
+    try {
+      if (hostWindow.SillyTavern && typeof hostWindow.SillyTavern.getContext === 'function') {
+        return hostWindow.SillyTavern.getContext();
+      }
+      if (window.SillyTavern && typeof window.SillyTavern.getContext === 'function') {
+        return window.SillyTavern.getContext();
+      }
+      return hostWindow.SillyTavern || window.SillyTavern || {};
+    } catch {
+      return {};
+    }
+  }
+
+  function clampParallelCap(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return DEFAULT_CONFIG.max_parallel_cap;
+    return Math.max(1, Math.min(10, Math.floor(num)));
+  }
+
+  function clampRetryCount(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return DEFAULT_CONFIG.retry_count;
+    return Math.max(0, Math.min(MAX_RETRY_COUNT, Math.floor(num)));
+  }
+
+  function clampRetryDelayMs(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return DEFAULT_CONFIG.retry_delay_ms;
+    return Math.max(0, Math.min(MAX_RETRY_DELAY_MS, Math.floor(num)));
+  }
+
+  function clampMinReplyTokens(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return DEFAULT_CONFIG.min_reply_tokens;
+    return Math.max(0, Math.min(MAX_MIN_REPLY_TOKENS, Math.floor(num)));
+  }
+
+  function getConfiguredRetryCount() {
+    return clampRetryCount(config?.retry_count ?? DEFAULT_429_RETRIES);
+  }
+
+  function getConfiguredRetryDelayMs() {
+    return clampRetryDelayMs(config?.retry_delay_ms ?? DEFAULT_429_RETRY_DELAY_MS);
+  }
+
+  function getConfiguredMinReplyTokens() {
+    return clampMinReplyTokens(config?.min_reply_tokens ?? DEFAULT_MIN_REPLY_TOKENS);
+  }
+
+  function normalizeConfig(rawConfig) {
+    const raw = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+    return {
+      enabled: typeof raw.enabled === 'boolean' ? raw.enabled : DEFAULT_CONFIG.enabled,
+      max_parallel_cap: clampParallelCap(raw.max_parallel_cap ?? DEFAULT_CONFIG.max_parallel_cap),
+      retry_count: clampRetryCount(raw.retry_count ?? DEFAULT_CONFIG.retry_count),
+      retry_delay_ms: clampRetryDelayMs(raw.retry_delay_ms ?? DEFAULT_CONFIG.retry_delay_ms),
+      min_reply_tokens: clampMinReplyTokens(raw.min_reply_tokens ?? DEFAULT_CONFIG.min_reply_tokens),
+      status_bar_position: normalizeStatusBarPosition(raw.status_bar_position ?? DEFAULT_CONFIG.status_bar_position),
+      status_bar_collapsed: typeof raw.status_bar_collapsed === 'boolean'
+        ? raw.status_bar_collapsed
+        : DEFAULT_CONFIG.status_bar_collapsed,
+    };
+  }
+
+  function loadConfig() {
+    try {
+      const scriptId = typeof getScriptId === 'function' ? getScriptId() : undefined;
+      const vars = typeof getVariables === 'function'
+        ? getVariables({ type: 'script', script_id: scriptId })
+        : {};
+      return normalizeConfig(vars ? vars[CONFIG_KEY] : undefined);
+    } catch (error) {
+      warn('读取脚本变量失败，使用默认配置:', error);
+      return { ...DEFAULT_CONFIG };
+    }
+  }
+
+  function saveConfig() {
+    try {
+      if (typeof insertOrAssignVariables !== 'function') return;
+      const scriptId = typeof getScriptId === 'function' ? getScriptId() : undefined;
+      insertOrAssignVariables({ [CONFIG_KEY]: config }, { type: 'script', script_id: scriptId });
+    } catch (error) {
+      warn('保存脚本变量失败:', error);
+    }
+  }
+
+  function getCurrentSource() {
+    const context = getContext();
+    const source = context?.chatCompletionSettings?.chat_completion_source
+      || context?.chatCompletionSettings?.chat_comletion_source
+      || '';
+    return typeof source === 'string' ? source : '';
+  }
+
+  function isGroupChat() {
+    const context = getContext();
+    return Boolean(context?.groupId);
+  }
+
+  function getNValueFromUi() {
+    const input = getHostDocument().querySelector('#n_openai');
+    if (!input) return 1;
+    const raw = Number(input.value ?? input.getAttribute('value') ?? 1);
+    if (!Number.isFinite(raw)) return 1;
+    return Math.max(1, Math.floor(raw));
+  }
+
+  function getDesiredN(generateData, options = {}) {
+    const allowUiFallback = options.allowUiFallback !== false;
+    let wanted = Number(generateData?.n);
+    if ((!Number.isFinite(wanted) || wanted < 1) && allowUiFallback) {
+      wanted = getNValueFromUi();
+    }
+    if (!Number.isFinite(wanted) || wanted < 1) {
+      return 1;
+    }
+
+    wanted = Math.max(1, Math.floor(wanted));
+    const cap = clampParallelCap(config.max_parallel_cap);
+
+    if (wanted > cap) {
+      warningToast(`并发上限为 ${cap}，已从 ${wanted} 限制到 ${cap}`);
+      wanted = cap;
+    }
+
+    return wanted;
+  }
+
+  function getSourceFromGenerateData(generateData) {
+    const source = generateData?.chat_completion_source
+      || generateData?.chat_comletion_source
+      || generateData?.source
+      || '';
+    return typeof source === 'string' ? source : '';
+  }
+
+  function deepClone(value) {
+    try {
+      if (typeof structuredClone === 'function') {
+        return structuredClone(value);
+      }
+    } catch {
+      // fallback below
+    }
+
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function patchNOpenAiVisibility() {
+    const input = getHostDocument().querySelector('#n_openai');
+    if (!input) return false;
+
+    const block = input.closest('.range-block');
+    if (!block) return false;
+
+    const current = String(block.getAttribute('data-source') || '');
+    const parts = current.split(',').map(x => x.trim()).filter(Boolean);
+    const sourceSet = new Set(parts);
+    for (const source of PARALLEL_SOURCES) {
+      sourceSet.add(source);
+    }
+    const next = Array.from(sourceSet).join(',');
+
+    if (next !== current) {
+      block.setAttribute('data-source', next);
+      log('已更新 n_openai 的 data-source:', next);
+    }
+
+    return true;
+  }
+
+  function getCurrentSourceFromUi() {
+    const hostDocument = getHostDocument();
+    const sourceSelect = hostDocument.querySelector('#chat_completion_source');
+    if (!sourceSelect) return '';
+    const value = sourceSelect.value;
+    return typeof value === 'string' ? value : '';
+  }
+
+  function applyDataSourceVisibility() {
+    const hostWindow = getHostWindow();
+    const hostDocument = getHostDocument();
+    const source = getCurrentSourceFromUi() || getCurrentSource();
+    if (!source) return;
+
+    if (hostWindow.$ && typeof hostWindow.$ === 'function') {
+      hostWindow.$('[data-source]', hostDocument).each(function () {
+        const $el = hostWindow.$(this);
+        const mode = $el.data('source-mode');
+        const rawSources = String($el.attr('data-source') || '');
+        const validSources = rawSources.split(',').map(x => x.trim()).filter(Boolean);
+        const matchesSource = validSources.includes(source);
+        const shouldShow = mode !== 'except' ? matchesSource : !matchesSource;
+        $el.toggle(shouldShow);
+      });
+      return;
+    }
+
+    const all = hostDocument.querySelectorAll('[data-source]');
+    all.forEach((el) => {
+      const mode = el.getAttribute('data-source-mode');
+      const rawSources = String(el.getAttribute('data-source') || '');
+      const validSources = rawSources.split(',').map(x => x.trim()).filter(Boolean);
+      const matchesSource = validSources.includes(source);
+      const shouldShow = mode !== 'except' ? matchesSource : !matchesSource;
+      if (shouldShow) {
+        el.style.display = '';
+      } else {
+        el.style.display = 'none';
+      }
+    });
+  }
+
+  function scheduleUiPatch() {
+    if (patchTimer) {
+      clearTimeout(patchTimer);
+    }
+    patchTimer = setTimeout(() => {
+      patchTimer = null;
+      patchNOpenAiVisibility();
+      applyDataSourceVisibility();
+      refreshStatusBarForRetryState();
+    }, 60);
+  }
+
+  function isPlainSlashCommand(text) {
+    return String(text || '').trimStart().startsWith('/');
+  }
+
+  function hasPendingAttachment() {
+    const hostDocument = getHostDocument();
+    const selectors = [
+      '#send_form .file-preview',
+      '#send_form .file_attachment',
+      '#send_form .media_attachment',
+      '#send_form .mes_file_container .file',
+    ];
+    return selectors.some(selector => hostDocument.querySelector(selector));
+  }
+
+  function shouldInterceptNormalSend() {
+    if (!config.enabled) return false;
+    if (isGroupChat()) return false;
+
+    const source = getCurrentSource();
+    if (!PARALLEL_SOURCES.has(source)) return false;
+
+    const wanted = getDesiredN(null, { allowUiFallback: true });
+    if (wanted <= 1) return false;
+
+    const textarea = getHostDocument().querySelector('#send_textarea');
+    if (!textarea) return false;
+
+    const text = String(textarea.value ?? '');
+    if (!text.trim()) return false;
+    if (isPlainSlashCommand(text)) return false;
+    if (hasPendingAttachment()) return false;
+
+    return true;
+  }
+
+  async function interceptNormalSend() {
+    if (manualSendLock) return;
+    manualSendLock = true;
+
+    try {
+      const hostWindow = getHostWindow();
+      const textarea = getHostDocument().querySelector('#send_textarea');
+      if (!textarea) return;
+
+      const text = String(textarea.value ?? '');
+      if (!text.trim()) return;
+
+      if (typeof triggerSlash !== 'function') {
+        throw new Error('triggerSlash 不可用');
+      }
+
+      await triggerSlash(`/send raw=true ${JSON.stringify(text)}`);
+      textarea.value = '';
+      textarea.dispatchEvent(new hostWindow.Event('input', { bubbles: true }));
+      textarea.dispatchEvent(new hostWindow.Event('change', { bubbles: true }));
+      await triggerSlash('/trigger');
+    } catch (error) {
+      warn('普通发送接管失败，已放弃本次接管:', error);
+      errorToast('普通发送接管失败，请重试一次');
+    } finally {
+      manualSendLock = false;
+    }
+  }
+
+  function onSendButtonCapture(event) {
+    if (!shouldInterceptNormalSend()) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    void interceptNormalSend();
+  }
+
+  function onTextareaKeydownCapture(event) {
+    if (event.key !== 'Enter' && event.key !== 'NumpadEnter') return;
+    if (event.shiftKey) return;
+    if (!shouldInterceptNormalSend()) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    void interceptNormalSend();
+  }
+
+  function bindNormalSendInterceptors() {
+    const hostDocument = getHostDocument();
+    const sendButton = hostDocument.querySelector('#send_but');
+    if (sendButton) {
+      sendButton.addEventListener('click', onSendButtonCapture, true);
+      domCleanups.push(() => sendButton.removeEventListener('click', onSendButtonCapture, true));
+    }
+
+    const textarea = hostDocument.querySelector('#send_textarea');
+    if (textarea) {
+      textarea.addEventListener('keydown', onTextareaKeydownCapture, true);
+      domCleanups.push(() => textarea.removeEventListener('keydown', onTextareaKeydownCapture, true));
+    }
+  }
+
+  function scheduleDomRebind() {
+    if (domBindTimer) {
+      clearTimeout(domBindTimer);
+    }
+    domBindTimer = setTimeout(() => {
+      domBindTimer = null;
+      cleanupDomListeners();
+      bindNormalSendInterceptors();
+    }, 80);
+  }
+
+  function getRequestHeaders() {
+    const context = getContext();
+    if (context && typeof context.getRequestHeaders === 'function') {
+      return context.getRequestHeaders();
+    }
+    return { 'Content-Type': 'application/json' };
+  }
+
+  function resolveRequestMethod(input, init) {
+    if (typeof init?.method === 'string' && init.method) {
+      return init.method.toUpperCase();
+    }
+    if (typeof Request !== 'undefined' && input instanceof Request && typeof input.method === 'string') {
+      return input.method.toUpperCase();
+    }
+    return 'GET';
+  }
+
+  function resolveRequestUrl(input) {
+    if (typeof input === 'string') return input;
+    if (typeof URL !== 'undefined' && input instanceof URL) return input.toString();
+    if (input && typeof input.url === 'string') return input.url;
+    return '';
+  }
+
+  function isGenerateApiRequest(input, init) {
+    if (init && init[FETCH_RETRY_SKIP_FLAG] === true) {
+      return false;
+    }
+
+    const method = resolveRequestMethod(input, init);
+    if (method !== 'POST') {
+      return false;
+    }
+
+    const rawUrl = resolveRequestUrl(input);
+    if (!rawUrl) {
+      return false;
+    }
+
+    try {
+      const parsed = new URL(rawUrl, window.location.origin);
+      return parsed.pathname === GENERATE_API_PATH;
+    } catch {
+      return rawUrl === GENERATE_API_PATH;
+    }
+  }
+
+  function createFetchRequestFactory(input, init) {
+    if (typeof Request === 'undefined') {
+      return null;
+    }
+
+    try {
+      const baseRequest = new Request(input, init);
+      return {
+        signal: baseRequest.signal,
+        next: () => baseRequest.clone(),
+      };
+    } catch (error) {
+      debug('构造可重试请求失败，回退为单次请求', {
+        message: error?.message || String(error),
+      });
+      return null;
+    }
+  }
+
+  function parseJsonSafely(text) {
+    if (typeof text !== 'string' || !text.trim()) return null;
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+
+  function isRateLimitErrorPayload(payload) {
+    if (!payload || typeof payload !== 'object') return false;
+
+    const nodes = [payload, payload.error].filter(node => node && typeof node === 'object');
+    for (const node of nodes) {
+      const code = Number(node.code);
+      if (Number.isFinite(code) && code === 429) return true;
+
+      const status = String(node.status || '').trim().toUpperCase();
+      if (status === 'RESOURCE_EXHAUSTED' || status === 'TOO_MANY_REQUESTS') return true;
+
+      const message = String(node.message || '');
+      if (/resource exhausted/i.test(message)) return true;
+      if (/\b429\b/.test(message) && /try again later/i.test(message)) return true;
+    }
+
+    return false;
+  }
+
+  function isRateLimitedResponse(status, errorPayload, errorText = '') {
+    if (Number(status) === 429) return true;
+    if (isRateLimitErrorPayload(errorPayload)) return true;
+
+    const text = String(errorText || '');
+    if (/resource exhausted/i.test(text)) return true;
+    if (/\b429\b/.test(text) && /try again later/i.test(text)) return true;
+    return false;
+  }
+
+  async function fetchGenerateWith429Retry(fetchImpl, input, init, meta = null) {
+    const retryStatusKey = createRetryStatusKey('foreground-retry');
+    const retryScope = String(meta?.scope || '').trim() ? `前台(${meta.scope})` : '前台';
+    const requestFactory = createFetchRequestFactory(input, init);
+    if (!requestFactory) {
+      return fetchImpl(input, init);
+    }
+
+    try {
+      const maxRetries = getConfiguredRetryCount();
+      const retryDelayMs = getConfiguredRetryDelayMs();
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        if (requestFactory.signal?.aborted) {
+          throw createAbortError('请求已中止');
+        }
+
+        const response = await fetchImpl(requestFactory.next());
+        let errorText = '';
+        let errorPayload = null;
+        if (!response.ok) {
+          try {
+            errorText = await response.clone().text();
+            errorPayload = parseJsonSafely(errorText);
+          } catch {
+            // ignore
+          }
+        }
+
+        const isRateLimited = isRateLimitedResponse(response.status, errorPayload, errorText);
+        if (!isRateLimited) {
+          return response;
+        }
+
+        if (attempt >= maxRetries) {
+          return response;
+        }
+
+        setRetryStatusEntry(retryStatusKey, {
+          reason: '429',
+          scope: retryScope,
+          attempt: attempt + 1,
+          maxRetries,
+        });
+        debug('前台生成请求命中限流，自动重试', {
+          scope: meta?.scope || 'unknown',
+          httpStatus: response.status,
+          retry: attempt + 1,
+          maxRetries,
+          retryDelayMs,
+        });
+
+        try {
+          if (response.body && typeof response.body.cancel === 'function') {
+            await response.body.cancel();
+          }
+        } catch {
+          // ignore
+        }
+
+        await sleepWithAbort(retryDelayMs, requestFactory.signal);
+      }
+    } finally {
+      clearRetryStatusEntry(retryStatusKey);
+    }
+
+    return fetchImpl(requestFactory.next());
+  }
+
+  function patchWindowFetchFor429Retry(targetWindow, scope) {
+    if (!targetWindow || typeof targetWindow.fetch !== 'function') return;
+    if (targetWindow[FETCH_PATCH_MARKER]) return;
+
+    const originalFetch = targetWindow.fetch.bind(targetWindow);
+    const patchedFetch = async (input, init) => {
+      if (!isGenerateApiRequest(input, init)) {
+        return originalFetch(input, init);
+      }
+      return fetchGenerateWith429Retry(originalFetch, input, init, { scope });
+    };
+
+    targetWindow.fetch = patchedFetch;
+    targetWindow[FETCH_PATCH_MARKER] = true;
+    fetchPatchCleanups.push(() => {
+      if (targetWindow.fetch === patchedFetch) {
+        targetWindow.fetch = originalFetch;
+      }
+      delete targetWindow[FETCH_PATCH_MARKER];
+    });
+  }
+
+  function installGenerateFetchRetryPatch() {
+    patchWindowFetchFor429Retry(window, 'iframe');
+    const hostWindow = getHostWindow();
+    if (hostWindow && hostWindow !== window) {
+      patchWindowFetchFor429Retry(hostWindow, 'host');
+    }
+  }
+
+  function cleanupGenerateFetchRetryPatch() {
+    while (fetchPatchCleanups.length > 0) {
+      const cleanup = fetchPatchCleanups.pop();
+      try {
+        cleanup();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  function extractTextFromContent(content) {
+    if (typeof content === 'string') {
+      return content;
+    }
+    if (Array.isArray(content)) {
+      return content
+        .map(part => {
+          if (typeof part === 'string') return part;
+          if (part && typeof part.text === 'string') return part.text;
+          return '';
+        })
+        .join('');
+    }
+    return '';
+  }
+
+  function extractResponseText(data) {
+    const choice = data?.choices?.[0];
+    const messageText = extractTextFromContent(choice?.message?.content);
+    if (messageText) return messageText;
+    if (typeof choice?.text === 'string') return choice.text;
+    if (typeof data?.text === 'string') return data.text;
+    return '';
+  }
+
+  async function countTextTokens(text) {
+    const normalized = String(text || '');
+    if (!normalized) return 0;
+    const context = getContext();
+
+    try {
+      if (context && typeof context.getTokenCountAsync === 'function') {
+        const count = await context.getTokenCountAsync(normalized);
+        if (Number.isFinite(count)) return Math.max(0, Math.floor(count));
+      }
+    } catch (error) {
+      debug('getTokenCountAsync(context) 失败，回退估算 token 数', { message: error?.message || String(error) });
+    }
+
+    try {
+      if (typeof getTokenCountAsync === 'function') {
+        const count = await getTokenCountAsync(normalized);
+        if (Number.isFinite(count)) return Math.max(0, Math.floor(count));
+      }
+    } catch (error) {
+      debug('getTokenCountAsync(global) 失败，回退估算 token 数', { message: error?.message || String(error) });
+    }
+
+    return Math.max(1, Math.ceil(normalized.length / 4));
+  }
+
+  function buildSingleRequestPayload(basePayload) {
+    const payload = deepClone(basePayload || {});
+    payload.stream = false;
+    payload.n = 1;
+    return payload;
+  }
+
+  async function requestSingleCompletionWithRetry(options = {}) {
+    const requestName = String(options.requestName || '请求');
+    const retryScope = String(options.retryScope || requestName);
+    const payload = buildSingleRequestPayload(options.payload);
+    const signal = options.signal;
+    const maxRetries = getConfiguredRetryCount();
+    const retryDelayMs = getConfiguredRetryDelayMs();
+    const minReplyTokens = Number.isFinite(Number(options.minReplyTokens))
+      ? Math.max(0, Math.floor(Number(options.minReplyTokens)))
+      : getConfiguredMinReplyTokens();
+    const retryStatusKey = createRetryStatusKey(`retry-${retryScope}`);
+
+    try {
+      for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+        if (signal?.aborted) {
+          throw createAbortError(`${requestName} 已中止`);
+        }
+
+        let response;
+        beginInternalGenerateRequest();
+        try {
+          response = await fetch(GENERATE_API_PATH, {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify(payload),
+            signal,
+            [FETCH_RETRY_SKIP_FLAG]: true,
+          });
+        } finally {
+          endInternalGenerateRequest();
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => '');
+          const errorPayload = parseJsonSafely(errorText);
+          const isRateLimited = isRateLimitedResponse(response.status, errorPayload, errorText);
+          debug('请求返回 HTTP 非 2xx', {
+            requestName,
+            retryScope,
+            status: response.status,
+            attempt: attempt + 1,
+            maxRetries,
+            rateLimited: isRateLimited,
+          });
+
+          if (isRateLimited && attempt < maxRetries) {
+            setRetryStatusEntry(retryStatusKey, {
+              reason: '429',
+              scope: retryScope,
+              attempt: attempt + 1,
+              maxRetries,
+            });
+            await sleepWithAbort(retryDelayMs, signal);
+            continue;
+          }
+
+          if (isRateLimited) {
+            throw new Error(`${requestName} 失败: 限流（HTTP ${response.status}，已重试 ${maxRetries} 次） ${errorText}`);
+          }
+
+          throw new Error(`${requestName} 失败: HTTP ${response.status} ${errorText}`);
+        }
+
+        const data = await response.json();
+        if (data?.error) {
+          throw new Error(`${requestName} 失败: ${data.error?.message || 'unknown error'}`);
+        }
+
+        const text = extractResponseText(data).trim();
+        const tokenCount = await countTextTokens(text);
+        if (!text) {
+          if (minReplyTokens > 0 && attempt < maxRetries) {
+            setRetryStatusEntry(retryStatusKey, {
+              reason: '长度不足',
+              scope: retryScope,
+              attempt: attempt + 1,
+              maxRetries,
+            });
+            await sleepWithAbort(retryDelayMs, signal);
+            continue;
+          }
+          throw new Error(`${requestName} 失败: 返回为空`);
+        }
+
+        if (minReplyTokens > 0 && tokenCount < minReplyTokens) {
+          if (attempt < maxRetries) {
+            setRetryStatusEntry(retryStatusKey, {
+              reason: '长度不足',
+              scope: retryScope,
+              attempt: attempt + 1,
+              maxRetries,
+            });
+            debug('请求命中最小长度限制，准备重试', {
+              requestName,
+              retryScope,
+              tokenCount,
+              minReplyTokens,
+              retry: attempt + 1,
+              maxRetries,
+              retryDelayMs,
+            });
+            await sleepWithAbort(retryDelayMs, signal);
+            continue;
+          }
+
+          throw new Error(`${requestName} 失败: 长度不足（${tokenCount} token，最小 ${minReplyTokens}，已重试 ${maxRetries} 次）`);
+        }
+
+        return {
+          text,
+          tokenCount,
+          attempts: attempt + 1,
+        };
+      }
+    } finally {
+      clearRetryStatusEntry(retryStatusKey);
+    }
+
+    throw new Error(`${requestName} 失败: 已重试 ${maxRetries} 次`);
+  }
+
+  async function runOneParallelRequest(job, index) {
+    const payload = buildSingleRequestPayload(job.basePayload);
+    const startedAt = Date.now();
+    debug('并发子请求开始', { jobId: job?.id, index, model: payload?.model, source: payload?.chat_completion_source || payload?.chat_comletion_source });
+
+    const controller = new AbortController();
+    job.controllers.push(controller);
+    const result = await requestSingleCompletionWithRetry({
+      payload,
+      signal: controller.signal,
+      requestName: `请求 #${index}`,
+      retryScope: `并发#${index}`,
+      minReplyTokens: getConfiguredMinReplyTokens(),
+    });
+    debug('并发子请求成功', {
+      jobId: job?.id,
+      index,
+      elapsedMs: Date.now() - startedAt,
+      textLength: result.text.length,
+      tokenCount: result.tokenCount,
+      attempts: result.attempts,
+    });
+    return result.text;
+  }
+
+  function readMessageById(messageId, assistantOnly = true) {
+    if (typeof getChatMessages !== 'function') {
+      return null;
+    }
+
+    const numericId = Number(messageId);
+    if (!Number.isFinite(numericId) || numericId < 0) {
+      return null;
+    }
+
+    const queryId = Math.floor(numericId);
+    const baseOptions = {
+      hide_state: 'all',
+      include_swipes: true,
+    };
+
+    if (assistantOnly) {
+      const assistantMessages = getChatMessages(queryId, {
+        role: 'assistant',
+        hide_state: 'all',
+        include_swipes: true,
+      });
+
+      if (assistantMessages && assistantMessages.length > 0) {
+        return assistantMessages[0];
+      }
+    }
+
+    const allMessages = getChatMessages(queryId, baseOptions);
+    if (!allMessages || allMessages.length === 0) {
+      return null;
+    }
+
+    if (!assistantOnly) {
+      return allMessages[0];
+    }
+
+    return allMessages.find(item => item && item.role === 'assistant') || null;
+  }
+
+  function readLatestAssistantMessage() {
+    if (typeof getChatMessages !== 'function') {
+      return null;
+    }
+
+    const assistantMessages = getChatMessages(-1, {
+      role: 'assistant',
+      hide_state: 'all',
+      include_swipes: true,
+    });
+
+    if (assistantMessages && assistantMessages.length > 0) {
+      return assistantMessages[assistantMessages.length - 1];
+    }
+
+    const latestMessages = getChatMessages(-1, {
+      hide_state: 'all',
+      include_swipes: true,
+    });
+
+    if (!latestMessages || latestMessages.length === 0) {
+      return null;
+    }
+
+    const latest = latestMessages[latestMessages.length - 1];
+    if (latest && latest.role === 'assistant') {
+      return latest;
+    }
+
+    return null;
+  }
+
+  function readLatestMessage() {
+    if (typeof getChatMessages !== 'function') {
+      return null;
+    }
+
+    const latestMessages = getChatMessages(-1, {
+      hide_state: 'all',
+      include_swipes: true,
+    });
+
+    if (!latestMessages || latestMessages.length === 0) {
+      return null;
+    }
+
+    return latestMessages[latestMessages.length - 1] || null;
+  }
+
+  function normalizeMessageId(value) {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    if (typeof value === 'string' && value.trim() === '') {
+      return null;
+    }
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+      return null;
+    }
+    return Math.floor(numeric);
+  }
+
+  function resolveTargetMessageId(rawEndedValue) {
+    const candidateIds = [];
+    const baseId = normalizeMessageId(rawEndedValue);
+
+    if (baseId !== null) {
+      candidateIds.push(baseId - 1);
+      candidateIds.push(baseId);
+    }
+
+    const seen = new Set();
+    for (const candidateId of candidateIds) {
+      if (!Number.isFinite(candidateId) || candidateId < 0) {
+        continue;
+      }
+      if (seen.has(candidateId)) {
+        continue;
+      }
+      seen.add(candidateId);
+
+      const message = readMessageById(candidateId, true);
+      if (message && Number.isFinite(Number(message.message_id))) {
+        return Number(message.message_id);
+      }
+    }
+
+    return null;
+  }
+
+  function sanitizeGeneratedTexts(texts) {
+    if (!Array.isArray(texts)) return [];
+    return texts
+      .map(item => String(item || '').trim())
+      .filter(Boolean);
+  }
+
+  async function appendSwipes(messageId, newSwipes) {
+    if (!Array.isArray(newSwipes) || newSwipes.length === 0) return;
+    debug('准备追加 swipes', {
+      messageId,
+      inputCount: Array.isArray(newSwipes) ? newSwipes.length : 0,
+    });
+
+    if (typeof getChatMessages !== 'function' || typeof setChatMessages !== 'function') {
+      throw new Error('getChatMessages/setChatMessages 不可用');
+    }
+
+    const message = readMessageById(messageId, true) || readMessageById(messageId, false);
+    if (!message) {
+      warn('找不到目标楼层，已跳过 swipe 追加:', { messageId });
+      return false;
+    }
+
+    const existing = Array.isArray(message.swipes) && message.swipes.length > 0
+      ? message.swipes.slice()
+      : [String(message.message || '')];
+
+    const sanitizedNewSwipes = sanitizeGeneratedTexts(newSwipes);
+
+    if (sanitizedNewSwipes.length === 0) {
+      debug('追加 swipes 已跳过，清洗后为空', { messageId });
+      return false;
+    }
+
+    const merged = existing.concat(sanitizedNewSwipes);
+    const rawSwipeId = Number(message.swipe_id);
+    const swipeId = Number.isFinite(rawSwipeId) ? Math.max(0, Math.floor(rawSwipeId)) : 0;
+    const clampedSwipeId = Math.min(swipeId, Math.max(0, merged.length - 1));
+    const targetMessageId = Number(message.message_id);
+
+    if (!Number.isFinite(targetMessageId) || targetMessageId < 0) {
+      warn('目标楼层 message_id 非法，已跳过 swipe 追加:', { messageId, targetMessageId });
+      return false;
+    }
+
+    await setChatMessages(
+      [{ message_id: targetMessageId, swipes: merged, swipe_id: clampedSwipeId }],
+      { refresh: 'affected' },
+    );
+
+    debug('追加 swipes 完成', {
+      messageId: targetMessageId,
+      beforeCount: existing.length,
+      addedCount: sanitizedNewSwipes.length,
+      afterCount: merged.length,
+      swipeId: clampedSwipeId,
+    });
+
+    return true;
+  }
+
+  function resolveWriteTarget(job) {
+    if (!job) return null;
+
+    const latestMessage = readLatestMessage();
+    const latestMessageId = Number(latestMessage?.message_id);
+    const latestIsUser = Boolean(latestMessage && latestMessage.role === 'user' && Number.isFinite(latestMessageId));
+
+    const eventMessageId = normalizeMessageId(job.targetMessageIdFromEvent);
+    if (eventMessageId !== null) {
+      const eventMessage = readMessageById(eventMessageId, true);
+      if (
+        eventMessage
+        && Number.isFinite(Number(eventMessage.message_id))
+        && (!latestIsUser || eventMessageId >= latestMessageId)
+      ) {
+        debug('目标楼层命中: MESSAGE_RECEIVED', {
+          jobId: job.id,
+          messageId: Number(eventMessage.message_id),
+          latestIsUser,
+          latestMessageId,
+        });
+        return {
+          mode: 'append_assistant',
+          messageId: Number(eventMessage.message_id),
+          source: 'message_received',
+        };
+      }
+    }
+
+    const endedMessageId = resolveTargetMessageId(job.generationEndedValue);
+    if (
+      Number.isFinite(endedMessageId)
+      && endedMessageId >= 0
+      && (!latestIsUser || endedMessageId >= latestMessageId)
+    ) {
+      debug('目标楼层命中: GENERATION_ENDED', {
+        jobId: job.id,
+        messageId: endedMessageId,
+        latestIsUser,
+        latestMessageId,
+      });
+      return {
+        mode: 'append_assistant',
+        messageId: endedMessageId,
+        source: 'generation_ended',
+      };
+    }
+
+    if (latestMessage && Number.isFinite(Number(latestMessage.message_id))) {
+      const latestMessageNumericId = Number(latestMessage.message_id);
+      if (latestMessage.role === 'assistant') {
+        debug('目标楼层命中: 最新楼层 assistant', {
+          jobId: job.id,
+          messageId: latestMessageNumericId,
+        });
+        return {
+          mode: 'append_assistant',
+          messageId: latestMessageNumericId,
+          source: 'latest_message_assistant',
+        };
+      }
+
+      if (latestMessage.role === 'user') {
+        debug('目标楼层命中: 最新楼层 user，需新建 assistant', {
+          jobId: job.id,
+          userMessageId: latestMessageNumericId,
+        });
+        return {
+          mode: 'create_after_user',
+          userMessageId: latestMessageNumericId,
+          source: 'latest_message_user',
+        };
+      }
+    }
+
+    const latestAssistant = readLatestAssistantMessage();
+    if (latestAssistant && Number.isFinite(Number(latestAssistant.message_id))) {
+      debug('目标楼层命中: 最新 assistant 兜底', {
+        jobId: job.id,
+        messageId: Number(latestAssistant.message_id),
+      });
+      return {
+        mode: 'append_assistant',
+        messageId: Number(latestAssistant.message_id),
+        source: 'latest_assistant_fallback',
+      };
+    }
+
+    debug('目标楼层解析失败', {
+      jobId: job.id,
+      latestMessageRole: latestMessage?.role || null,
+      latestMessageId: Number.isFinite(latestMessageId) ? latestMessageId : null,
+      targetMessageIdFromEvent: job.targetMessageIdFromEvent,
+      generationEndedValue: job.generationEndedValue,
+    });
+    return null;
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function createAbortError(message) {
+    try {
+      return new DOMException(message, 'AbortError');
+    } catch {
+      const error = new Error(message);
+      error.name = 'AbortError';
+      return error;
+    }
+  }
+
+  function sleepWithAbort(ms, signal) {
+    if (!signal) {
+      return sleep(ms);
+    }
+
+    if (signal.aborted) {
+      throw createAbortError('等待重试时任务已中止');
+    }
+
+    return new Promise((resolve, reject) => {
+      let timer = null;
+
+      const onAbort = () => {
+        if (timer !== null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        signal.removeEventListener('abort', onAbort);
+        reject(createAbortError('等待重试时任务已中止'));
+      };
+
+      timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  function createForegroundSession(generationSeq) {
+    return {
+      generationSeq: Number(generationSeq) || 0,
+      payloadSnapshot: null,
+      stopped: false,
+      validationPromise: null,
+      validationController: null,
+    };
+  }
+
+  function abortForegroundValidation(reason = 'foreground aborted') {
+    const session = activeForegroundSession;
+    if (!session) return;
+    session.stopped = true;
+    if (session.validationController) {
+      try {
+        session.validationController.abort();
+      } catch {
+        // ignore
+      }
+      session.validationController = null;
+    }
+    debug('前台最小长度校验已中断', {
+      generationSeq: session.generationSeq,
+      reason,
+    });
+  }
+
+  function beginForegroundSession(generationSeq) {
+    if (activeForegroundSession && activeForegroundSession.generationSeq !== generationSeq) {
+      abortForegroundValidation('新一轮生成已开始');
+    }
+    activeForegroundSession = createForegroundSession(generationSeq);
+    return activeForegroundSession;
+  }
+
+  function isForegroundValidationRunning() {
+    const session = activeForegroundSession;
+    return Boolean(session && session.validationController && !session.stopped);
+  }
+
+  function beginInternalGenerateRequest() {
+    internalGenerateRequestInFlight += 1;
+  }
+
+  function endInternalGenerateRequest() {
+    internalGenerateRequestInFlight = Math.max(0, internalGenerateRequestInFlight - 1);
+  }
+
+  function hasInternalGenerateRequestInFlight() {
+    return internalGenerateRequestInFlight > 0;
+  }
+
+  function getOrCreateForegroundSession() {
+    if (!activeForegroundSession || activeForegroundSession.generationSeq !== generationSequence) {
+      activeForegroundSession = createForegroundSession(generationSequence);
+    }
+    return activeForegroundSession;
+  }
+
+  function updateForegroundPayloadSnapshot(generateData) {
+    const session = getOrCreateForegroundSession();
+    session.payloadSnapshot = deepClone(generateData || {});
+    session.stopped = false;
+    return session;
+  }
+
+  function resolveEndedAssistantMessageId(rawEndedValue) {
+    const resolvedId = resolveTargetMessageId(rawEndedValue);
+    if (Number.isFinite(resolvedId) && resolvedId >= 0) {
+      return resolvedId;
+    }
+
+    const baseId = normalizeMessageId(rawEndedValue);
+    if (baseId === null) return null;
+    const candidates = [baseId, baseId - 1];
+    for (const candidate of candidates) {
+      if (!Number.isFinite(candidate) || candidate < 0) continue;
+      const message = readMessageById(candidate, true);
+      if (message && Number.isFinite(Number(message.message_id))) {
+        return Number(message.message_id);
+      }
+    }
+    return null;
+  }
+
+  function getMessageTextForValidation(messageId) {
+    const message = readMessageById(messageId, true) || readMessageById(messageId, false);
+    if (!message) return '';
+
+    if (Array.isArray(message.swipes) && message.swipes.length > 0) {
+      const rawSwipeId = Number(message.swipe_id);
+      const swipeId = Number.isFinite(rawSwipeId) ? Math.max(0, Math.floor(rawSwipeId)) : 0;
+      const clampedSwipeId = Math.min(swipeId, Math.max(0, message.swipes.length - 1));
+      const currentSwipeText = String(message.swipes[clampedSwipeId] || '').trim();
+      if (currentSwipeText) {
+        return currentSwipeText;
+      }
+    }
+
+    return String(message.message || '').trim();
+  }
+
+  async function replaceAssistantMessageText(messageId, text) {
+    if (typeof setChatMessages !== 'function') {
+      throw new Error('setChatMessages 不可用');
+    }
+
+    const normalizedText = String(text || '').trim();
+    if (!normalizedText) {
+      throw new Error('写入文本为空');
+    }
+
+    const message = readMessageById(messageId, true) || readMessageById(messageId, false);
+    if (!message || !Number.isFinite(Number(message.message_id))) {
+      throw new Error(`目标楼层不存在: ${messageId}`);
+    }
+
+    const targetMessageId = Number(message.message_id);
+    const patch = {
+      message_id: targetMessageId,
+      message: normalizedText,
+    };
+
+    if (Array.isArray(message.swipes) && message.swipes.length > 0) {
+      const rawSwipeId = Number(message.swipe_id);
+      const swipeId = Number.isFinite(rawSwipeId) ? Math.max(0, Math.floor(rawSwipeId)) : 0;
+      const clampedSwipeId = Math.min(swipeId, Math.max(0, message.swipes.length - 1));
+      const nextSwipes = message.swipes.slice();
+      nextSwipes[clampedSwipeId] = normalizedText;
+      patch.swipes = nextSwipes;
+      patch.swipe_id = clampedSwipeId;
+    }
+
+    await setChatMessages([patch], { refresh: 'affected' });
+    return true;
+  }
+
+  function shouldValidateForegroundMinReplyTokens() {
+    return getConfiguredMinReplyTokens() > 0;
+  }
+
+  function markForegroundValidationDoneForJob(job) {
+    if (!job) return;
+    job.foregroundValidationDone = true;
+  }
+
+  function runForegroundMinTokenValidation(messageId, job = null) {
+    if (!shouldValidateForegroundMinReplyTokens()) {
+      markForegroundValidationDoneForJob(job);
+      return null;
+    }
+
+    const session = getOrCreateForegroundSession();
+    if (!session || session.stopped) {
+      markForegroundValidationDoneForJob(job);
+      return null;
+    }
+    if (!session.payloadSnapshot || typeof session.payloadSnapshot !== 'object') {
+      debug('前台最小长度校验跳过：缺少生成参数快照', { generationSeq: session?.generationSeq });
+      markForegroundValidationDoneForJob(job);
+      return null;
+    }
+
+    const targetMessageId = Number(messageId);
+    if (!Number.isFinite(targetMessageId) || targetMessageId < 0) {
+      debug('前台最小长度校验跳过：message_id 无效', { messageId });
+      markForegroundValidationDoneForJob(job);
+      return null;
+    }
+
+    if (session.validationPromise) {
+      return session.validationPromise;
+    }
+
+    const controller = new AbortController();
+    session.validationController = controller;
+
+    const runner = (async () => {
+      try {
+        const minReplyTokens = getConfiguredMinReplyTokens();
+        const currentText = getMessageTextForValidation(targetMessageId);
+        const currentTokenCount = await countTextTokens(currentText);
+        if (currentTokenCount >= minReplyTokens) {
+          debug('前台回复已满足最小长度，无需补请求', {
+            messageId: targetMessageId,
+            tokenCount: currentTokenCount,
+            minReplyTokens,
+          });
+          return { replaced: false, tokenCount: currentTokenCount };
+        }
+
+        debug('前台回复未达最小长度，开始补请求', {
+          messageId: targetMessageId,
+          tokenCount: currentTokenCount,
+          minReplyTokens,
+        });
+
+        const result = await requestSingleCompletionWithRetry({
+          payload: session.payloadSnapshot,
+          signal: controller.signal,
+          requestName: '前台补请求',
+          retryScope: '前台',
+          minReplyTokens,
+        });
+
+        await replaceAssistantMessageText(targetMessageId, result.text);
+        debug('前台补请求完成并已覆盖楼层文本', {
+          messageId: targetMessageId,
+          tokenCount: result.tokenCount,
+          attempts: result.attempts,
+        });
+        return { replaced: true, tokenCount: result.tokenCount };
+      } catch (error) {
+        if (error?.name !== 'AbortError') {
+          warn('前台最小长度校验失败:', error);
+          warningToast(`前台最小长度重试失败：${error?.message || 'unknown error'}`);
+        } else {
+          debug('前台最小长度校验被中断', {
+            messageId: targetMessageId,
+            generationSeq: session.generationSeq,
+          });
+        }
+        return null;
+      } finally {
+        session.validationController = null;
+        session.validationPromise = null;
+        markForegroundValidationDoneForJob(job);
+        refreshStatusBarForRetryState();
+        if (job && activeJob && activeJob.id === job.id && !isJobTerminal(job)) {
+          void tryFinalizeJob(job);
+        }
+      }
+    })();
+
+    session.validationPromise = runner;
+    return runner;
+  }
+
+  async function findCreatedAssistantMessageId(jobId, minExclusiveId) {
+    if (typeof getLastMessageId !== 'function') {
+      return null;
+    }
+
+    const minId = Number.isFinite(Number(minExclusiveId))
+      ? Math.floor(Number(minExclusiveId))
+      : -1;
+
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const rawLastId = Number(getLastMessageId());
+      if (Number.isFinite(rawLastId) && rawLastId >= 0) {
+        const lastId = Math.floor(rawLastId);
+        for (let messageId = lastId; messageId > minId && messageId >= 0; messageId--) {
+          const message = readMessageById(messageId, false);
+          if (!message || message.role !== 'assistant') continue;
+
+          const markerId = Number(message?.extra?.__gemini_parallel_job_id);
+          if (markerId === Number(jobId)) {
+            return Number(message.message_id);
+          }
+        }
+      }
+      await sleep(80);
+    }
+
+    return null;
+  }
+
+  async function createAssistantMessageWithSwipes(job, newSwipes) {
+    if (typeof createChatMessages !== 'function' || typeof setChatMessages !== 'function') {
+      throw new Error('createChatMessages/setChatMessages 不可用');
+    }
+
+    const sanitized = sanitizeGeneratedTexts(newSwipes);
+    if (sanitized.length === 0) {
+      debug('新建 assistant 已跳过，清洗后无可写入文本', { jobId: job?.id });
+      return { appended: false, messageId: null };
+    }
+
+    const firstText = sanitized[0];
+    const restTexts = sanitized.slice(1);
+    const beforeLastMessageId = typeof getLastMessageId === 'function'
+      ? Number(getLastMessageId())
+      : null;
+
+    await createChatMessages(
+      [
+        {
+          role: 'assistant',
+          message: firstText,
+          extra: { __gemini_parallel_job_id: job.id },
+        },
+      ],
+      { refresh: 'affected' },
+    );
+    debug('已创建 assistant 楼层（待定位 message_id）', {
+      jobId: job?.id,
+      firstTextLength: firstText.length,
+      extraSwipeCount: restTexts.length,
+      beforeLastMessageId,
+    });
+
+    const createdMessageId = await findCreatedAssistantMessageId(job.id, beforeLastMessageId);
+    if (!Number.isFinite(createdMessageId) || createdMessageId < 0) {
+      warn('并发结果已生成，但新建 assistant 楼层定位失败');
+      return { appended: false, messageId: null };
+    }
+
+    if (restTexts.length > 0) {
+      await setChatMessages(
+        [
+          {
+            message_id: createdMessageId,
+            swipes: [firstText].concat(restTexts),
+            swipe_id: 0,
+          },
+        ],
+        { refresh: 'affected' },
+      );
+      debug('新建 assistant 的 swipes 写入完成', {
+        jobId: job?.id,
+        messageId: createdMessageId,
+        swipeCount: restTexts.length + 1,
+      });
+    }
+
+    debug('新建 assistant 完成', {
+      jobId: job?.id,
+      messageId: createdMessageId,
+      wroteSwipes: restTexts.length > 0,
+    });
+
+    return { appended: true, messageId: createdMessageId };
+  }
+
+  async function executeParallelJob(job) {
+    const total = Math.max(0, Number(job.extraCount) || 0);
+    const progress = job.progress && typeof job.progress === 'object'
+      ? job.progress
+      : { completed: 0, total, success: 0, failed: 0 };
+    job.progress = progress;
+    progress.total = total;
+    progress.completed = Number(progress.completed) || 0;
+    progress.success = Number(progress.success) || 0;
+    progress.failed = Number(progress.failed) || 0;
+    job.bufferedTexts = Array.isArray(job.bufferedTexts) ? job.bufferedTexts : [];
+    job.flushedCount = Number(job.flushedCount) || 0;
+    job.writtenCount = Number(job.writtenCount) || 0;
+    job.writeFailedCount = Number(job.writeFailedCount) || 0;
+
+    try {
+      debug('并发任务开始执行', {
+        job: summarizeJob(job),
+      });
+      setJobPhase(job, JOB_PHASES.prefetching);
+      updateParallelStatusBar(job, progress);
+
+      const tasks = [];
+      for (let i = 0; i < total; i++) {
+        const task = runOneParallelRequest(job, i + 1)
+          .then((text) => {
+            const normalized = String(text || '').trim();
+            if (normalized) {
+              progress.success += 1;
+              job.bufferedTexts.push(normalized);
+              debug('并发子请求结果入队', {
+                jobId: job.id,
+                index: i + 1,
+                bufferedCount: job.bufferedTexts.length,
+                flushedCount: Number(job.flushedCount) || 0,
+              });
+              void tryFinalizeJob(job);
+            }
+            return normalized;
+          })
+          .catch((error) => {
+            progress.failed += 1;
+            if (error?.name !== 'AbortError') {
+              warn(error);
+            }
+            throw error;
+          })
+          .finally(() => {
+            progress.completed += 1;
+            updateParallelStatusBar(job, progress);
+          });
+        tasks.push(task);
+      }
+
+      await Promise.allSettled(tasks);
+      if (job.aborted || job.superseded || isJobTerminal(job)) {
+        debug('并发任务执行结束但已中止/废弃，跳过写入', { job: summarizeJob(job) });
+        return;
+      }
+
+      job.parallelCompleted = true;
+      debug('并发任务请求阶段完成', {
+        jobId: job.id,
+        successCount: Number(progress.success) || 0,
+        failedCount: Number(progress.failed) || 0,
+        completed: Number(progress.completed) || 0,
+        total: Number(progress.total) || 0,
+        bufferedCount: job.bufferedTexts.length,
+        flushedCount: Number(job.flushedCount) || 0,
+      });
+      setJobPhase(job, JOB_PHASES.waiting_target);
+      await tryFinalizeJob(job);
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        debug('并发任务执行抛错', {
+          jobId: job?.id,
+          message: error?.message || String(error),
+        });
+        throw error;
+      }
+      debug('并发任务执行被 AbortError 终止', { jobId: job?.id });
+    }
+  }
+
+  async function tryFinalizeJob(job) {
+    if (!job) {
+      debug('tryFinalizeJob 跳过: job 为空');
+      return;
+    }
+    if (!activeJob || activeJob.id !== job.id) {
+      debug('tryFinalizeJob 跳过: 非 activeJob', {
+        jobId: job.id,
+        activeJobId: activeJob?.id || null,
+      });
+      return;
+    }
+    if (job.finalizing) {
+      debug('tryFinalizeJob 跳过: 正在 finalizing', { jobId: job.id });
+      return;
+    }
+    if (isJobTerminal(job)) {
+      debug('tryFinalizeJob 跳过: 任务已终态', { job: summarizeJob(job) });
+      return;
+    }
+    if (job.superseded) {
+      debug('tryFinalizeJob 跳过: 任务已 superseded', { job: summarizeJob(job) });
+      return;
+    }
+
+    if (!job.foregroundEnded && !job.foregroundStopped) {
+      debug('tryFinalizeJob 等待前台结束/停止', { jobId: job.id });
+      setJobPhase(job, JOB_PHASES.waiting_target);
+      return;
+    }
+
+    if (!job.foregroundValidationDone) {
+      debug('tryFinalizeJob 等待前台最小长度校验完成', { jobId: job.id });
+      setJobPhase(job, JOB_PHASES.waiting_target);
+      return;
+    }
+
+    job.finalizing = true;
+    debug('tryFinalizeJob 开始写入阶段', { job: summarizeJob(job) });
+
+    try {
+      if (!activeJob || activeJob.id !== job.id || isJobTerminal(job) || job.superseded) {
+        debug('tryFinalizeJob 写入前二次校验未通过', {
+          jobId: job.id,
+          activeJobId: activeJob?.id || null,
+          terminal: isJobTerminal(job),
+          superseded: Boolean(job.superseded),
+        });
+        return;
+      }
+
+      const bufferedTexts = Array.isArray(job.bufferedTexts) ? job.bufferedTexts : [];
+      const currentFlushed = Number(job.flushedCount) || 0;
+      if (currentFlushed > bufferedTexts.length) {
+        job.flushedCount = bufferedTexts.length;
+      }
+
+      const hasPendingWrites = (Number(job.flushedCount) || 0) < bufferedTexts.length;
+      if (hasPendingWrites) {
+        let target = job.writeTarget || null;
+        if (!target) {
+          target = resolveWriteTarget(job);
+          if (target) {
+            job.writeTarget = target;
+          }
+        }
+
+        if (!target) {
+          debug('tryFinalizeJob 无法确定目标楼层', { job: summarizeJob(job) });
+          if (job.parallelCompleted) {
+            if (!job.targetResolveFailedWarned) {
+              job.targetResolveFailedWarned = true;
+              warningToast(`并发结果已生成，但未能定位目标楼层（成功 ${Number(job.progress?.success) || 0} / ${job.extraCount}）`);
+            }
+            setJobPhase(job, JOB_PHASES.done);
+          } else {
+            setJobPhase(job, JOB_PHASES.waiting_target);
+          }
+          return;
+        }
+
+        debug('tryFinalizeJob 目标楼层已确定', { jobId: job.id, target });
+        setJobPhase(job, JOB_PHASES.writing);
+
+        while ((Number(job.flushedCount) || 0) < bufferedTexts.length) {
+          const writeIndex = Number(job.flushedCount) || 0;
+          const nextText = String(bufferedTexts[writeIndex] || '').trim();
+          job.flushedCount = writeIndex + 1;
+
+          if (!nextText) {
+            debug('tryFinalizeJob 跳过空文本写入', { jobId: job.id, writeIndex });
+            continue;
+          }
+
+          let appended = false;
+          const preferredTargetMessageId = target.mode === 'append_assistant'
+            ? normalizeMessageId(target.messageId)
+            : null;
+          let targetMessageId = preferredTargetMessageId ?? normalizeMessageId(job.targetMessageId);
+
+          if (targetMessageId !== null) {
+            appended = await appendSwipes(targetMessageId, [nextText]);
+          } else if (target.mode === 'append_assistant') {
+            debug('tryFinalizeJob 跳过写入：append_assistant 目标 message_id 无效', {
+              jobId: job.id,
+              target,
+              writeIndex,
+            });
+            appended = false;
+          } else if (target.mode === 'create_after_user') {
+            const created = await createAssistantMessageWithSwipes(job, [nextText]);
+            appended = Boolean(created?.appended);
+            targetMessageId = normalizeMessageId(created?.messageId);
+          }
+
+          if (targetMessageId !== null) {
+            job.messageId = targetMessageId;
+            job.targetMessageId = targetMessageId;
+          }
+
+          if (appended) {
+            job.writtenCount = (Number(job.writtenCount) || 0) + 1;
+            debug('tryFinalizeJob 增量写入成功', {
+              jobId: job.id,
+              writeIndex,
+              targetMessageId: job.targetMessageId,
+              writtenCount: Number(job.writtenCount) || 0,
+              totalBuffered: bufferedTexts.length,
+            });
+          } else {
+            job.writeFailedCount = (Number(job.writeFailedCount) || 0) + 1;
+            debug('tryFinalizeJob 增量写入失败', {
+              jobId: job.id,
+              writeIndex,
+              target,
+              writeFailedCount: Number(job.writeFailedCount) || 0,
+            });
+          }
+        }
+      }
+
+      if (!job.parallelCompleted) {
+        setJobPhase(job, JOB_PHASES.waiting_target);
+        return;
+      }
+
+      const successCount = Number(job.progress?.success) || 0;
+      const failedCount = Number(job.progress?.failed) || 0;
+      const writtenCount = Number(job.writtenCount) || 0;
+      const writeFailedCount = Number(job.writeFailedCount) || 0;
+
+      if (writtenCount > 0) {
+        if (failedCount > 0 || writeFailedCount > 0 || writtenCount < successCount) {
+          warningToast(`并发补全完成：已写入 ${writtenCount} / 成功 ${successCount} / 目标 ${job.extraCount}`);
+        } else {
+          successToast(`并发补全完成：新增 ${writtenCount} 个候选`);
+        }
+      } else if (successCount > 0) {
+        warningToast(`并发结果已生成，但未能写入候选（成功 ${successCount} / ${job.extraCount}）`);
+      } else if (failedCount > 0) {
+        warningToast(`并发补全失败：成功 0 / 目标 ${job.extraCount}`);
+      }
+
+      setJobPhase(job, JOB_PHASES.done);
+    } catch (error) {
+      debug('tryFinalizeJob 捕获异常', {
+        jobId: job.id,
+        message: error?.message || String(error),
+      });
+      if (error?.name !== 'AbortError') {
+        warn('并发补全写入失败:', error);
+        errorToast('并发补全失败，已保留首条原生回复');
+      }
+      setJobPhase(job, JOB_PHASES.done);
+    } finally {
+      debug('tryFinalizeJob 结束', { job: summarizeJob(job) });
+      job.finalizing = false;
+      if (isJobTerminal(job)) {
+        clearActiveJobIfMatch(job);
+      }
+    }
+  }
+
+  function clearActiveJobIfMatch(job) {
+    if (activeJob && job && activeJob.id === job.id) {
+      debug('清理 activeJob', { job: summarizeJob(job) });
+      stopStatusBarTracker();
+      removeJobStatusBar(job);
+      activeJob = null;
+      refreshStatusBarForRetryState();
+    }
+  }
+
+  function shouldArmParallelJob(options = {}) {
+    const generationType = typeof options.generationType === 'string'
+      ? options.generationType
+      : lastGenerationType;
+    const source = typeof options.source === 'string' ? options.source : '';
+    const desiredN = Number(options.desiredN);
+
+    if (!config.enabled) return false;
+    if (isGroupChat()) return false;
+    if (!ALLOWED_TYPES.has(generationType)) return false;
+    if (!PARALLEL_SOURCES.has(source)) return false;
+    if (!Number.isFinite(desiredN) || desiredN <= 1) return false;
+
+    return true;
+  }
+
+  function onGenerationStarted(type) {
+    const normalizedType = typeof type === 'string' ? type : 'normal';
+    debug('收到 GENERATION_STARTED', {
+      type: normalizedType,
+      generationSequenceBefore: generationSequence,
+      activeJob: summarizeJob(activeJob),
+    });
+
+    if (normalizedType === 'normal' && isForegroundValidationRunning()) {
+      debug('忽略前台最小长度补请求触发的 GENERATION_STARTED', {
+        generationSequence,
+        activeJob: summarizeJob(activeJob),
+      });
+      return;
+    }
+
+    if (normalizedType === 'normal' && hasInternalGenerateRequestInFlight()) {
+      debug('忽略脚本内部并发请求触发的 GENERATION_STARTED', {
+        generationSequence,
+        inFlight: internalGenerateRequestInFlight,
+        activeJob: summarizeJob(activeJob),
+      });
+      return;
+    }
+
+    lastGenerationType = normalizedType;
+
+    generationSequence += 1;
+    beginForegroundSession(generationSequence);
+
+    if (
+      activeJob
+      && !isJobTerminal(activeJob)
+      && Number(activeJob.startedAtGenerationSeq) < generationSequence
+    ) {
+      supersedeActiveJob('会话已进入下一轮（新一轮生成已开始）');
+    }
+  }
+
+  function onChatCompletionSettingsReady(generateData) {
+    const generationType = ALLOWED_TYPES.has(lastGenerationType) ? lastGenerationType : 'normal';
+    const source = getSourceFromGenerateData(generateData) || getCurrentSource();
+    const allowUiFallback = true;
+    const desiredN = getDesiredN(generateData, { allowUiFallback });
+
+    debug('收到 CHAT_COMPLETION_SETTINGS_READY', {
+      hasActiveJob: Boolean(activeJob),
+      activeJobTerminal: isJobTerminal(activeJob),
+      n: Number(generateData?.n),
+      source,
+      generationType,
+      desiredN,
+      allowUiFallback,
+    });
+
+    try {
+      if (activeJob && !isJobTerminal(activeJob)) {
+        debug('跳过本次并发初始化：已有进行中任务', { activeJob: summarizeJob(activeJob) });
+        return;
+      }
+
+      if (!shouldArmParallelJob({ generationType, source, desiredN })) {
+        debug('跳过本次并发初始化：未满足触发条件', {
+          generationType,
+          source,
+          desiredN,
+          allowUiFallback,
+          enabled: config.enabled,
+          groupChat: isGroupChat(),
+        });
+        return;
+      }
+
+      if (
+        FORCE_SINGLE_FOREGROUND_SOURCES.has(source)
+        && desiredN > 1
+        && generateData
+        && typeof generateData === 'object'
+      ) {
+        const originalN = Number(generateData.n);
+        generateData.n = 1;
+        debug('前台请求已强制改为 n=1，改由脚本并发补齐', {
+          source,
+          originalN,
+          desiredN,
+        });
+      }
+
+      const foregroundSession = updateForegroundPayloadSnapshot(generateData);
+      debug('前台生成参数快照已更新', {
+        generationSeq: foregroundSession?.generationSeq,
+        hasPayload: Boolean(foregroundSession?.payloadSnapshot),
+      });
+
+      const job = {
+        id: ++jobCounter,
+        state: JOB_PHASES.armed,
+        phase: JOB_PHASES.armed,
+        source,
+        generationType,
+        targetN: desiredN,
+        extraCount: desiredN - 1,
+        basePayload: deepClone(generateData),
+        controllers: [],
+        aborted: false,
+        messageId: null,
+        targetMessageId: null,
+        targetMessageIdFromEvent: null,
+        generationEndedValue: null,
+        bufferedTexts: [],
+        flushedCount: 0,
+        writtenCount: 0,
+        writeFailedCount: 0,
+        writeTarget: null,
+        targetResolveFailedWarned: false,
+        parallelCompleted: false,
+        foregroundEnded: false,
+        foregroundStopped: false,
+        foregroundValidationDone: !shouldValidateForegroundMinReplyTokens(),
+        superseded: false,
+        supersededReason: '',
+        startedAtGenerationSeq: generationSequence,
+        finalizing: false,
+        progress: {
+          completed: 0,
+          total: desiredN - 1,
+          success: 0,
+          failed: 0,
+        },
+        createdAt: Date.now(),
+      };
+
+      activeJob = job;
+      startStatusBarTracker(job);
+      log(`并发任务已就绪 #${job.id}`, {
+        source: job.source,
+        type: job.generationType,
+        n: job.targetN,
+        extra: job.extraCount,
+      });
+      debug('并发任务初始化完成', { job: summarizeJob(job) });
+
+      void (async () => {
+        try {
+          await executeParallelJob(job);
+        } catch (error) {
+          if (error?.name !== 'AbortError') {
+            warn('并发补全执行失败:', error);
+            errorToast('并发补全失败，已保留首条原生回复');
+          }
+          if (activeJob && activeJob.id === job.id) {
+            setJobPhase(job, JOB_PHASES.done);
+            clearActiveJobIfMatch(job);
+          }
+        }
+      })();
+    } catch (error) {
+      warn('初始化并发任务失败:', error);
+    }
+  }
+
+  function onGenerationStopped() {
+    const job = activeJob;
+    debug('收到 GENERATION_STOPPED', { activeJob: summarizeJob(job) });
+    abortForegroundValidation('收到 GENERATION_STOPPED');
+
+    if (!job) {
+      stopStatusBarTracker();
+      refreshStatusBarForRetryState();
+      return;
+    }
+    if (isJobTerminal(job)) return;
+
+    job.foregroundStopped = true;
+    job.foregroundValidationDone = true;
+    void tryFinalizeJob(job);
+  }
+
+  function onGenerationEnded(messageId) {
+    const job = activeJob;
+    debug('收到 GENERATION_ENDED', { messageId, activeJob: summarizeJob(job) });
+    const targetMessageId = resolveEndedAssistantMessageId(messageId);
+
+    if (job && !isJobTerminal(job)) {
+      job.foregroundEnded = true;
+      job.generationEndedValue = messageId;
+      job.foregroundValidationDone = !shouldValidateForegroundMinReplyTokens();
+
+      if (Number.isFinite(targetMessageId) && targetMessageId >= 0) {
+        job.targetMessageIdFromEvent = targetMessageId;
+        debug('GENERATION_ENDED 提供了可用目标 message_id', {
+          jobId: job.id,
+          resolvedMessageId: targetMessageId,
+        });
+      }
+    }
+
+    if (Number.isFinite(targetMessageId) && targetMessageId >= 0) {
+      const validationPromise = runForegroundMinTokenValidation(targetMessageId, job && !isJobTerminal(job) ? job : null);
+      if (!validationPromise && job && !isJobTerminal(job)) {
+        job.foregroundValidationDone = true;
+      }
+    } else if (shouldValidateForegroundMinReplyTokens()) {
+      debug('前台最小长度校验跳过：未解析到目标楼层', { endedMessageId: messageId });
+      if (job && !isJobTerminal(job)) {
+        job.foregroundValidationDone = true;
+      }
+    }
+
+    if (job && !isJobTerminal(job)) {
+      void tryFinalizeJob(job);
+    }
+  }
+
+  function onMessageReceived(messageId) {
+    const job = activeJob;
+    debug('收到 MESSAGE_RECEIVED', { messageId, activeJob: summarizeJob(job) });
+    if (!job || isJobTerminal(job)) return;
+
+    const message = readMessageById(messageId, true);
+    if (message && Number.isFinite(Number(message.message_id))) {
+      job.targetMessageIdFromEvent = Number(message.message_id);
+      job.targetMessageId = Number(message.message_id);
+      debug('MESSAGE_RECEIVED 绑定目标楼层成功', {
+        jobId: job.id,
+        messageId: Number(message.message_id),
+      });
+    }
+
+    void tryFinalizeJob(job);
+  }
+
+  function onMessageSent() {
+    const job = activeJob;
+    debug('收到 MESSAGE_SENT', { activeJob: summarizeJob(job) });
+    abortForegroundValidation('用户已发送新消息');
+    if (!job || isJobTerminal(job)) return;
+    supersedeActiveJob('会话已进入下一轮（用户已发送新消息）');
+  }
+
+  function bindEvent(eventType, listener) {
+    if (typeof eventOn !== 'function') return;
+    const ret = eventOn(eventType, listener);
+    if (ret && typeof ret.stop === 'function') {
+      eventStops.push(ret.stop);
+    }
+  }
+
+  function bindTavernEvents() {
+    if (typeof tavern_events === 'undefined') {
+      warn('tavern_events 不可用，无法完成初始化');
+      return;
+    }
+
+    bindEvent(tavern_events.APP_READY, scheduleUiPatch);
+    bindEvent(tavern_events.CHATCOMPLETION_SOURCE_CHANGED, scheduleUiPatch);
+    bindEvent(tavern_events.OAI_PRESET_CHANGED_AFTER, scheduleUiPatch);
+    bindEvent(tavern_events.GENERATION_STARTED, onGenerationStarted);
+    bindEvent(tavern_events.MESSAGE_SENT, onMessageSent);
+    bindEvent(tavern_events.MESSAGE_RECEIVED, onMessageReceived);
+    bindEvent(tavern_events.CHAT_COMPLETION_SETTINGS_READY, onChatCompletionSettingsReady);
+    bindEvent(tavern_events.GENERATION_STOPPED, onGenerationStopped);
+    bindEvent(tavern_events.GENERATION_ENDED, onGenerationEnded);
+    debug('事件绑定完成', {
+      events: [
+        'APP_READY',
+        'CHATCOMPLETION_SOURCE_CHANGED',
+        'OAI_PRESET_CHANGED_AFTER',
+        'GENERATION_STARTED',
+        'MESSAGE_SENT',
+        'MESSAGE_RECEIVED',
+        'CHAT_COMPLETION_SETTINGS_READY',
+        'GENERATION_STOPPED',
+        'GENERATION_ENDED',
+      ],
+    });
+  }
+
+  function startMutationObserver() {
+    const hostWindow = getHostWindow();
+    const hostDocument = getHostDocument();
+    const Observer = hostWindow.MutationObserver || window.MutationObserver;
+    if (!Observer || mutationObserver) return;
+    if (!hostDocument || !hostDocument.body) return;
+
+    mutationObserver = new Observer(() => {
+      scheduleUiPatch();
+      scheduleDomRebind();
+    });
+
+    mutationObserver.observe(hostDocument.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['data-source'],
+    });
+  }
+
+  function cleanupDomListeners() {
+    while (domCleanups.length > 0) {
+      const fn = domCleanups.pop();
+      try {
+        fn();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  function status() {
+    const source = getCurrentSource();
+    const n = getNValueFromUi();
+    const bufferedCount = Array.isArray(activeJob?.bufferedTexts)
+      ? activeJob.bufferedTexts.length
+      : 0;
+
+    return {
+      enabled: config.enabled,
+      max_parallel_cap: config.max_parallel_cap,
+      retry_count: getConfiguredRetryCount(),
+      retry_delay_ms: getConfiguredRetryDelayMs(),
+      min_reply_tokens: getConfiguredMinReplyTokens(),
+      current_source: source,
+      current_n: n,
+      group_chat: isGroupChat(),
+      last_generation_type: lastGenerationType,
+      active_job: activeJob
+        ? {
+            id: activeJob.id,
+            state: activeJob.state,
+            phase: activeJob.phase,
+            source: activeJob.source,
+            generationType: activeJob.generationType,
+            targetN: activeJob.targetN,
+            extraCount: activeJob.extraCount,
+            messageId: activeJob.targetMessageId ?? activeJob.messageId ?? null,
+            target_message_id: activeJob.targetMessageId ?? activeJob.messageId ?? null,
+            foreground_stopped: Boolean(activeJob.foregroundStopped),
+            foreground_ended: Boolean(activeJob.foregroundEnded),
+            superseded: Boolean(activeJob.superseded),
+            buffered_count: bufferedCount,
+            aborted: activeJob.aborted,
+          }
+        : null,
+    };
+  }
+
+  function enable() {
+    config.enabled = true;
+    saveConfig();
+    refreshStatusBarForRetryState();
+    successToast('已启用 Gemini 并发补全');
+    return status();
+  }
+
+  function disable() {
+    config.enabled = false;
+    saveConfig();
+    abortActiveJob('插件已禁用');
+    refreshStatusBarForRetryState();
+    warningToast('已禁用 Gemini 并发补全');
+    return status();
+  }
+
+  function forcePatchUi() {
+    return patchNOpenAiVisibility();
+  }
+
+  function exposeDebugApi() {
+    window.GeminiParallelSwipe = {
+      status,
+      enable,
+      disable,
+      forcePatchUi,
+    };
+  }
+
+  function destroy() {
+    abortActiveJob('脚本实例销毁');
+    abortForegroundValidation('脚本实例销毁');
+    activeForegroundSession = null;
+    removeAllParallelStatusBars();
+
+    while (eventStops.length > 0) {
+      const stop = eventStops.pop();
+      try {
+        stop();
+      } catch {
+        // ignore
+      }
+    }
+
+    cleanupDomListeners();
+
+    if (patchTimer) {
+      clearTimeout(patchTimer);
+      patchTimer = null;
+    }
+    if (domBindTimer) {
+      clearTimeout(domBindTimer);
+      domBindTimer = null;
+    }
+
+    if (mutationObserver) {
+      mutationObserver.disconnect();
+      mutationObserver = null;
+    }
+
+    if (window.GeminiParallelSwipe) {
+      delete window.GeminiParallelSwipe;
+    }
+
+    removeStatusBarStyle();
+  }
+
+  function init() {
+    scheduleDomRebind();
+    bindTavernEvents();
+    startMutationObserver();
+    scheduleUiPatch();
+    refreshStatusBarForRetryState();
+    exposeDebugApi();
+    debug('调试日志开关状态', { enabled: isDebugEnabled(), flagKey: DEBUG_FLAG_KEY });
+    log('初始化完成', status());
+  }
+
+  globalObj[instanceKey] = { destroy };
+
+  if (typeof $ === 'function') {
+    $(init);
+  } else {
+    setTimeout(init, 0);
+  }
+
+  window.addEventListener('pagehide', () => {
+    destroy();
+  });
+})();

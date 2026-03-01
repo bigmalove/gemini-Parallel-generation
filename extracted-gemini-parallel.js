@@ -12,15 +12,17 @@
   ]);
   const FORCE_SINGLE_FOREGROUND_SOURCES = new Set(['openai', 'custom', 'openrouter', 'azure_openai']);
   const ALLOWED_TYPES = new Set(['normal', 'regenerate', 'continue']);
-  const NORMAL_PARALLEL_ARM_TTL_MS = 5000;
   const CONFIG_KEY = 'gemini_parallel_swipe_config';
   const STATUS_BAR_STYLE_ID = 'gemini-parallel-status-style';
   const STATUS_BAR_CLASS = 'gemini-parallel-status-bar';
   const STATUS_BAR_TEXT_CLASS = 'gemini-parallel-status-text';
+  const STATUS_BAR_DOTS_CLASS = 'gemini-parallel-status-dots';
+  const STATUS_BAR_DOT_CLASS = 'gemini-parallel-status-dot';
   const STATUS_BAR_TOGGLE_BUTTON_CLASS = 'gemini-parallel-status-toggle-btn';
   const STATUS_BAR_SETTINGS_BUTTON_CLASS = 'gemini-parallel-status-settings-btn';
   const STATUS_BAR_DRAGGING_CLASS = 'is-dragging';
   const STATUS_BAR_COLLAPSED_CLASS = 'is-collapsed';
+  const STATUS_BAR_SIMPLE_MODE_CLASS = 'is-simple-mode';
   const SETTINGS_PANEL_CLASS = 'gemini-parallel-settings-panel';
   const SETTINGS_ROW_CLASS = 'gemini-parallel-settings-row';
   const SETTINGS_STEPPER_CLASS = 'gemini-parallel-settings-stepper';
@@ -40,8 +42,23 @@
     retry_count: 5,
     retry_delay_ms: 1000,
     min_reply_tokens: 0,
+    parallel_temperatures: [],
     status_bar_position: null,
     status_bar_collapsed: false,
+    status_bar_simple_mode: false,
+    old_floor_swipe_enabled: true,
+    worldbook_switcher_enabled: true,
+    worldbook_switcher: {
+      simpleMode: true,
+      favoriteWorldbooks: [],
+      currentWorldbook: '',
+      entryUsageStats: {},
+      panelState: {
+        allWorldbooks: false,
+        frequentEntries: false,
+      },
+      pinnedWorldbooks: [],
+    },
   };
   const GENERATE_API_PATH = '/api/backends/chat-completions/generate';
   const DEFAULT_429_RETRIES = 5;
@@ -50,11 +67,14 @@
   const MAX_RETRY_COUNT = 10;
   const MAX_RETRY_DELAY_MS = 10000;
   const MAX_MIN_REPLY_TOKENS = 4096;
+  const MIN_TEMPERATURE = 0;
+  const MAX_TEMPERATURE = 2;
+  const DEFAULT_PARALLEL_TEMPERATURE = 1.0;
   const FETCH_RETRY_SKIP_FLAG = '__gemini_parallel_retry_handled';
   const FETCH_PATCH_MARKER = '__GeminiParallelSwipeFetchPatched';
 
   const instanceKey = '__GeminiParallelSwipeInstance';
-  const globalObj = window;
+  const globalObj = getHostWindow();
 
   if (globalObj[instanceKey] && typeof globalObj[instanceKey].destroy === 'function') {
     try {
@@ -82,8 +102,6 @@
   let retryStatusKeySeq = 0;
   let activeForegroundSession = null;
   let internalGenerateRequestInFlight = 0;
-  let normalParallelArmExpireAt = 0;
-  let normalParallelArmTokenSeq = 0;
   const eventStops = [];
   const domCleanups = [];
   const fetchPatchCleanups = [];
@@ -248,6 +266,7 @@
       }
 
       .${STATUS_BAR_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} .${STATUS_BAR_TEXT_CLASS},
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} .${STATUS_BAR_DOTS_CLASS},
       .${STATUS_BAR_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} .${STATUS_BAR_SETTINGS_BUTTON_CLASS} {
         display: none;
       }
@@ -284,6 +303,58 @@
         text-overflow: ellipsis;
       }
 
+      .${STATUS_BAR_DOTS_CLASS} {
+        display: none;
+        align-items: center;
+        gap: 6px;
+        min-height: 10px;
+      }
+
+      .${STATUS_BAR_DOT_CLASS} {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #64748b;
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
+      }
+
+      .${STATUS_BAR_DOT_CLASS}[data-state='success'] {
+        background: var(--GeminiParallelDotSuccess, #22c55e);
+      }
+
+      .${STATUS_BAR_DOT_CLASS}[data-state='failed'] {
+        background: var(--GeminiParallelDotFailed, #ef4444);
+      }
+
+      .${STATUS_BAR_DOT_CLASS}[data-state='retrying'] {
+        background: var(--GeminiParallelDotRetrying, #f59e0b);
+      }
+
+      .${STATUS_BAR_DOT_CLASS}[data-state='running'] {
+        background: var(--GeminiParallelDotRunning, #38bdf8);
+      }
+
+      .${STATUS_BAR_DOT_CLASS}[data-state='idle'] {
+        background: var(--GeminiParallelDotIdle, #64748b);
+      }
+
+      .${STATUS_BAR_DOT_CLASS}[data-state='disabled'] {
+        background: var(--GeminiParallelDotDisabled, #475569);
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} {
+        gap: 6px;
+        padding-right: 8px;
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} .${STATUS_BAR_TEXT_CLASS} {
+        display: none;
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} .${STATUS_BAR_DOTS_CLASS} {
+        display: inline-flex;
+      }
+
       .${STATUS_BAR_SETTINGS_BUTTON_CLASS} {
         flex: 0 0 auto;
         border: 1px solid rgba(255, 255, 255, 0.28);
@@ -298,6 +369,14 @@
         align-items: center;
         line-height: 1.3;
         cursor: pointer;
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} .${STATUS_BAR_SETTINGS_BUTTON_CLASS} {
+        width: 22px;
+        min-width: 22px;
+        padding: 0;
+        justify-content: center;
+        font-size: 12px;
       }
 
       .${STATUS_BAR_SETTINGS_BUTTON_CLASS}:hover {
@@ -324,7 +403,8 @@
         color: var(--SmartThemeBodyColor, inherit);
       }
 
-      .${SETTINGS_ROW_CLASS} input[type='number'] {
+      .${SETTINGS_ROW_CLASS} input[type='number'],
+      .${SETTINGS_ROW_CLASS} input[type='text'] {
         width: 120px;
         height: 34px;
         padding: 4px 10px;
@@ -340,11 +420,13 @@
         box-sizing: border-box;
       }
 
-      .${SETTINGS_ROW_CLASS} input[type='number']::placeholder {
+      .${SETTINGS_ROW_CLASS} input[type='number']::placeholder,
+      .${SETTINGS_ROW_CLASS} input[type='text']::placeholder {
         color: var(--SmartThemeQuoteColor, rgba(245, 247, 250, 0.55));
       }
 
-      .${SETTINGS_ROW_CLASS} input[type='number']:focus {
+      .${SETTINGS_ROW_CLASS} input[type='number']:focus,
+      .${SETTINGS_ROW_CLASS} input[type='text']:focus {
         outline: none;
         border-color: var(--SmartThemeEmColor, rgba(126, 180, 255, 0.9));
         box-shadow: 0 0 0 2px color-mix(in srgb, var(--SmartThemeEmColor, #7eb4ff) 24%, transparent);
@@ -424,14 +506,233 @@
     return `并发补全 ${enabledState} · 重试 ${retryCount} 次 · 延迟 ${retryDelayMs}ms · 最小 ${minReplyTokens} token`;
   }
 
+  function isStatusBarSimpleMode() {
+    return Boolean(config?.status_bar_simple_mode);
+  }
+
+  function createDotStateArray(state, count) {
+    const size = Math.max(0, Math.floor(Number(count) || 0));
+    return Array.from({ length: size }, () => state);
+  }
+
+  function getRetryStatusStats() {
+    let total = 0;
+    let foreground = 0;
+    retryStatusEntries.forEach((entry) => {
+      total += 1;
+      const scope = String(entry?.scope || '');
+      if (scope.startsWith('前台')) {
+        foreground += 1;
+      }
+    });
+    return {
+      total,
+      foreground,
+      parallel: Math.max(0, total - foreground),
+    };
+  }
+
+  function resolveForegroundDotState(job, foregroundRetryingCount) {
+    if (foregroundRetryingCount > 0) return 'retrying';
+    if (!job || job.aborted) return config.enabled ? 'idle' : 'disabled';
+    if (job.foregroundStopped) return 'failed';
+    if (!job.foregroundEnded) return 'running';
+    if (!job.foregroundValidationDone) return 'running';
+    return 'success';
+  }
+
+  function buildStatusDotStates(progress, job) {
+    const retryStats = getRetryStatusStats();
+    const retryingCount = retryStats.total;
+    const liveJob = job && !job.aborted && !isJobTerminal(job) ? job : null;
+    if (liveJob) {
+      const total = Math.max(0, Math.floor(Number(progress?.total) || Number(liveJob.extraCount) || 0));
+      const foregroundState = resolveForegroundDotState(liveJob, retryStats.foreground);
+      if (total > 0) {
+        const success = Math.max(0, Math.min(total, Math.floor(Number(progress?.success) || 0)));
+        const failed = Math.max(0, Math.min(total - success, Math.floor(Number(progress?.failed) || 0)));
+        const completed = Math.max(
+          0,
+          Math.min(total, Math.floor(Number(progress?.completed) || success + failed)),
+        );
+        const inflight = Math.max(0, total - completed);
+        const retrying = Math.max(0, Math.min(inflight, retryStats.parallel));
+        const running = Math.max(0, inflight - retrying);
+        return [
+          foregroundState,
+          ...createDotStateArray('success', success),
+          ...createDotStateArray('failed', failed),
+          ...createDotStateArray('retrying', retrying),
+          ...createDotStateArray('running', running),
+        ];
+      }
+      return [foregroundState];
+    }
+
+    if (retryingCount > 0) {
+      return createDotStateArray('retrying', retryingCount);
+    }
+    if (!config.enabled) {
+      return ['disabled'];
+    }
+    return ['idle'];
+  }
+
+  function renderStatusBarDots(container, states) {
+    if (!isDomElement(container)) return;
+    const hostDocument = getHostDocument();
+    if (!hostDocument) return;
+    const normalizedStates = Array.isArray(states)
+      ? states.filter(state => typeof state === 'string' && state)
+      : [];
+    const limitedStates = normalizedStates.slice(0, 24);
+    const nextStates = limitedStates.length > 0 ? limitedStates : ['idle'];
+    container.replaceChildren(
+      ...nextStates.map((state) => {
+        const dot = hostDocument.createElement('span');
+        dot.className = STATUS_BAR_DOT_CLASS;
+        dot.dataset.state = state;
+        return dot;
+      }),
+    );
+  }
+
   function resolvePopupApi() {
     const context = getContext();
     const hostWindow = getHostWindow();
-    const popupHost = context || hostWindow?.SillyTavern || window.SillyTavern || {};
-    const popupFn = typeof popupHost.callGenericPopup === 'function' ? popupHost.callGenericPopup : null;
-    const popupType = popupHost.POPUP_TYPE || null;
-    const popupResult = popupHost.POPUP_RESULT || null;
+    const candidates = [
+      context,
+      hostWindow?.SillyTavern,
+      window.SillyTavern,
+      hostWindow,
+      window,
+    ].filter(Boolean);
+
+    let popupFn = null;
+    let popupType = null;
+    let popupResult = null;
+
+    for (const candidate of candidates) {
+      if (!popupFn && typeof candidate.callGenericPopup === 'function') {
+        popupFn = candidate.callGenericPopup.bind(candidate);
+      }
+      if (!popupType && candidate.POPUP_TYPE) {
+        popupType = candidate.POPUP_TYPE;
+      }
+      if (!popupResult && candidate.POPUP_RESULT) {
+        popupResult = candidate.POPUP_RESULT;
+      }
+    }
+
+    if (!popupFn && typeof callGenericPopup === 'function') {
+      popupFn = callGenericPopup;
+    }
+    if (!popupType && typeof POPUP_TYPE !== 'undefined') {
+      popupType = POPUP_TYPE;
+    }
+    if (!popupResult && typeof POPUP_RESULT !== 'undefined') {
+      popupResult = POPUP_RESULT;
+    }
+
     return { popupFn, popupType, popupResult };
+  }
+
+  function openFallbackConfirmDialog(contentNode, options = {}) {
+    return new Promise((resolve) => {
+      const hostDocument = getHostDocument();
+      const hostWindow = getHostWindow();
+      if (!hostDocument || !hostDocument.body) {
+        resolve(false);
+        return;
+      }
+
+      const overlay = hostDocument.createElement('div');
+      overlay.style.position = 'fixed';
+      overlay.style.left = '0';
+      overlay.style.top = '0';
+      overlay.style.right = '0';
+      overlay.style.bottom = '0';
+      overlay.style.background = 'rgba(0, 0, 0, 0.5)';
+      overlay.style.display = 'flex';
+      overlay.style.alignItems = 'center';
+      overlay.style.justifyContent = 'center';
+      overlay.style.zIndex = '2147483647';
+
+      const panel = hostDocument.createElement('div');
+      panel.style.minWidth = '320px';
+      panel.style.maxWidth = '90vw';
+      panel.style.maxHeight = '85vh';
+      panel.style.overflowY = 'auto';
+      panel.style.padding = '14px';
+      panel.style.borderRadius = '10px';
+      panel.style.border = '1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.28))';
+      panel.style.background = 'var(--SmartThemeBlurTintColor, rgba(20,24,32,0.96))';
+      panel.style.color = 'var(--SmartThemeBodyColor, #f5f7fa)';
+      panel.style.boxShadow = '0 12px 32px rgba(0,0,0,0.45)';
+
+      const buttonRow = hostDocument.createElement('div');
+      buttonRow.style.display = 'flex';
+      buttonRow.style.justifyContent = 'flex-end';
+      buttonRow.style.gap = '10px';
+      buttonRow.style.marginTop = '12px';
+
+      const cancelButton = hostDocument.createElement('button');
+      cancelButton.type = 'button';
+      cancelButton.textContent = options.cancelText || '取消';
+      cancelButton.style.minWidth = '70px';
+      cancelButton.style.height = '34px';
+      cancelButton.style.borderRadius = '8px';
+      cancelButton.style.border = '1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.28))';
+      cancelButton.style.background = 'transparent';
+      cancelButton.style.color = 'inherit';
+      cancelButton.style.cursor = 'pointer';
+
+      const okButton = hostDocument.createElement('button');
+      okButton.type = 'button';
+      okButton.textContent = options.okText || '确定';
+      okButton.style.minWidth = '70px';
+      okButton.style.height = '34px';
+      okButton.style.borderRadius = '8px';
+      okButton.style.border = '1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.28))';
+      okButton.style.background = 'var(--SmartThemeEmColor, #7eb4ff)';
+      okButton.style.color = '#111';
+      okButton.style.fontWeight = '700';
+      okButton.style.cursor = 'pointer';
+
+      buttonRow.append(cancelButton, okButton);
+      panel.append(contentNode, buttonRow);
+      overlay.appendChild(panel);
+      hostDocument.body.appendChild(overlay);
+
+      let closed = false;
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        overlay.remove();
+        hostWindow.removeEventListener('keydown', onKeyDown, true);
+      };
+
+      const closeWith = (value) => {
+        cleanup();
+        resolve(value);
+      };
+
+      const onKeyDown = (event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeWith(false);
+        }
+      };
+
+      cancelButton.addEventListener('click', () => closeWith(false));
+      okButton.addEventListener('click', () => closeWith(true));
+      overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) {
+          closeWith(false);
+        }
+      });
+      hostWindow.addEventListener('keydown', onKeyDown, true);
+    });
   }
 
   function isPopupAffirmative(result, popupResult) {
@@ -449,17 +750,13 @@
     isSettingsPopupOpening = true;
     try {
       const { popupFn, popupType, popupResult } = resolvePopupApi();
-      if (!popupFn || !popupType) {
-        warningToast('当前环境不支持弹窗设置');
-        return;
-      }
 
       const hostDocument = getHostDocument();
       const panel = hostDocument.createElement('div');
       panel.className = SETTINGS_PANEL_CLASS;
 
       const title = hostDocument.createElement('div');
-      title.textContent = '并发重试设置';
+      title.textContent = '并发补全设置';
       title.style.fontWeight = '700';
       panel.appendChild(title);
 
@@ -509,11 +806,75 @@
       minTokenRow.append(minTokenLabel, minTokenInput);
       panel.appendChild(minTokenRow);
 
+      const parallelTemperatureRow = hostDocument.createElement('div');
+      parallelTemperatureRow.className = SETTINGS_ROW_CLASS;
+      const parallelTemperatureLabel = hostDocument.createElement('label');
+      parallelTemperatureLabel.textContent = '并发温度（支持 , ， 、 | 分隔）';
+      parallelTemperatureLabel.style.fontWeight = '700';
+      parallelTemperatureLabel.style.fontSize = '13px';
+      parallelTemperatureLabel.style.color = 'var(--SmartThemeEmColor, #9ac7ff)';
+      const parallelTemperatureInput = hostDocument.createElement('input');
+      parallelTemperatureInput.type = 'text';
+      parallelTemperatureInput.placeholder = '例如：0.7,1.0、1.3|1.5（留空沿用前台温度）';
+      parallelTemperatureInput.style.fontSize = '13px';
+      parallelTemperatureInput.style.fontWeight = '600';
+      parallelTemperatureInput.style.width = '220px';
+      parallelTemperatureInput.style.color = 'var(--SmartThemeBodyColor, #f5f7fa)';
+      parallelTemperatureInput.style.background = 'var(--SmartThemeBlurTintColor, rgba(20, 24, 32, 0.92))';
+      parallelTemperatureInput.style.borderColor = 'var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.28))';
+      parallelTemperatureInput.value = formatParallelTemperatures(getConfiguredParallelTemperatures());
+      parallelTemperatureRow.append(parallelTemperatureLabel, parallelTemperatureInput);
+      panel.appendChild(parallelTemperatureRow);
+
       const hint = hostDocument.createElement('div');
       hint.textContent = '说明：最小回复长度为 0 时表示关闭长度重试。';
       hint.style.opacity = '0.8';
       hint.style.fontSize = '12px';
       panel.appendChild(hint);
+
+      const temperatureHint = hostDocument.createElement('div');
+      temperatureHint.textContent = '并发温度支持 , ， 、 | 分隔，超出 0~2 会自动限制。';
+      temperatureHint.style.opacity = '0.92';
+      temperatureHint.style.fontSize = '13px';
+      temperatureHint.style.fontWeight = '600';
+      temperatureHint.style.color = 'var(--SmartThemeEmColor, #9ac7ff)';
+      panel.appendChild(temperatureHint);
+
+      const moduleTitle = hostDocument.createElement('div');
+      moduleTitle.textContent = '功能模块';
+      moduleTitle.style.fontWeight = '700';
+      moduleTitle.style.marginTop = '10px';
+      panel.appendChild(moduleTitle);
+
+      const swipeRow = hostDocument.createElement('div');
+      swipeRow.className = SETTINGS_ROW_CLASS;
+      const swipeLabel = hostDocument.createElement('label');
+      swipeLabel.textContent = '旧楼层 Swipe';
+      const swipeCheckbox = hostDocument.createElement('input');
+      swipeCheckbox.type = 'checkbox';
+      swipeCheckbox.checked = Boolean(config.old_floor_swipe_enabled);
+      swipeRow.append(swipeLabel, swipeCheckbox);
+      panel.appendChild(swipeRow);
+
+      const wbRow = hostDocument.createElement('div');
+      wbRow.className = SETTINGS_ROW_CLASS;
+      const wbLabel = hostDocument.createElement('label');
+      wbLabel.textContent = '世界书快捷切换';
+      const wbCheckbox = hostDocument.createElement('input');
+      wbCheckbox.type = 'checkbox';
+      wbCheckbox.checked = Boolean(config.worldbook_switcher_enabled);
+      wbRow.append(wbLabel, wbCheckbox);
+      panel.appendChild(wbRow);
+
+      const statusBarSimpleRow = hostDocument.createElement('div');
+      statusBarSimpleRow.className = SETTINGS_ROW_CLASS;
+      const statusBarSimpleLabel = hostDocument.createElement('label');
+      statusBarSimpleLabel.textContent = '状态栏简易模式（仅圆点）';
+      const statusBarSimpleCheckbox = hostDocument.createElement('input');
+      statusBarSimpleCheckbox.type = 'checkbox';
+      statusBarSimpleCheckbox.checked = isStatusBarSimpleMode();
+      statusBarSimpleRow.append(statusBarSimpleLabel, statusBarSimpleCheckbox);
+      panel.appendChild(statusBarSimpleRow);
 
       const adjustRetryValue = (delta) => {
         const current = clampRetryCount(Number(retryValue.textContent) || 0);
@@ -523,13 +884,23 @@
       retryDec.addEventListener('click', () => adjustRetryValue(-1));
       retryInc.addEventListener('click', () => adjustRetryValue(1));
 
-      const result = await popupFn(panel, popupType.CONFIRM, '', {
-        okButton: '保存',
-        cancelButton: '取消',
-        wider: true,
-        leftAlign: true,
-        allowVerticalScrolling: true,
-      });
+      let result = false;
+      if (popupFn) {
+        const confirmType = popupType?.CONFIRM ?? popupType?.confirm ?? popupType ?? 'confirm';
+        result = await popupFn(panel, confirmType, '', {
+          okButton: '保存',
+          cancelButton: '取消',
+          wider: true,
+          leftAlign: true,
+          allowVerticalScrolling: true,
+        });
+      } else {
+        warningToast('未检测到酒馆弹窗 API，使用备用设置弹窗');
+        result = await openFallbackConfirmDialog(panel, {
+          okText: '保存',
+          cancelText: '取消',
+        });
+      }
       if (!isPopupAffirmative(result, popupResult)) {
         return;
       }
@@ -537,16 +908,47 @@
       const nextRetryCount = clampRetryCount(Number(retryValue.textContent));
       const nextRetryDelayMs = clampRetryDelayMs(Number(delayInput.value));
       const nextMinReplyTokens = clampMinReplyTokens(Number(minTokenInput.value));
+      const parsedParallelTemperatures = parseParallelTemperaturesInput(parallelTemperatureInput.value);
+      if (!parsedParallelTemperatures.ok) {
+        errorToast(`并发温度配置无效：${parsedParallelTemperatures.error}`);
+        return;
+      }
+      const nextParallelTemperatures = parsedParallelTemperatures.values;
+      const nextOldFloorSwipeEnabled = Boolean(swipeCheckbox.checked);
+      const nextWorldbookSwitcherEnabled = Boolean(wbCheckbox.checked);
+      const nextStatusBarSimpleMode = Boolean(statusBarSimpleCheckbox.checked);
+      const moduleSwitchChanged = nextOldFloorSwipeEnabled !== Boolean(config.old_floor_swipe_enabled)
+        || nextWorldbookSwitcherEnabled !== Boolean(config.worldbook_switcher_enabled);
 
       config = normalizeConfig({
         ...config,
         retry_count: nextRetryCount,
         retry_delay_ms: nextRetryDelayMs,
         min_reply_tokens: nextMinReplyTokens,
+        parallel_temperatures: nextParallelTemperatures,
+        status_bar_simple_mode: nextStatusBarSimpleMode,
+        old_floor_swipe_enabled: nextOldFloorSwipeEnabled,
+        worldbook_switcher_enabled: nextWorldbookSwitcherEnabled,
       });
-      saveConfig();
+      const configSaved = await saveConfig();
+      if (!configSaved) {
+        errorToast('配置保存失败，已取消重载');
+        return;
+      }
       refreshStatusBarForRetryState();
-      successToast('重试设置已保存');
+
+      if (moduleSwitchChanged) {
+        infoToast('模块开关已更新，正在重载页面...');
+        const hostWindow = getHostWindow();
+        if (hostWindow && hostWindow.location && typeof hostWindow.location.reload === 'function') {
+          hostWindow.location.reload();
+          return;
+        }
+        window.location.reload();
+        return;
+      }
+
+      successToast('并发设置已保存');
     } catch (error) {
       warn('打开设置弹窗失败:', error);
       errorToast('设置弹窗打开失败');
@@ -561,6 +963,15 @@
     void openSettingsPopup();
   }
 
+  function onStatusBarSettingsButtonPointerDown(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (typeof event.stopImmediatePropagation === 'function') {
+      event.stopImmediatePropagation();
+    }
+    void openSettingsPopup();
+  }
+
   function isStatusBarCollapsed() {
     return Boolean(config?.status_bar_collapsed);
   }
@@ -568,6 +979,7 @@
   function applyStatusBarCollapsedState(bar, collapsed) {
     if (!isDomElement(bar)) return;
     const textNode = bar.querySelector(`.${STATUS_BAR_TEXT_CLASS}`);
+    const dotsNode = bar.querySelector(`.${STATUS_BAR_DOTS_CLASS}`);
     const settingsButton = bar.querySelector(`.${STATUS_BAR_SETTINGS_BUTTON_CLASS}`);
     bar.classList.toggle(STATUS_BAR_COLLAPSED_CLASS, collapsed);
 
@@ -579,6 +991,7 @@
       bar.style.gap = '0';
       bar.style.justifyContent = 'center';
       if (isDomElement(textNode)) textNode.style.display = 'none';
+      if (isDomElement(dotsNode)) dotsNode.style.display = 'none';
       if (isDomElement(settingsButton)) settingsButton.style.display = 'none';
       return;
     }
@@ -590,6 +1003,7 @@
     bar.style.gap = '';
     bar.style.justifyContent = '';
     if (isDomElement(textNode)) textNode.style.display = '';
+    if (isDomElement(dotsNode)) dotsNode.style.display = '';
     if (isDomElement(settingsButton)) settingsButton.style.display = '';
   }
 
@@ -664,6 +1078,19 @@
     if (isDomElement(target)) return target;
     const parent = target && typeof target === 'object' ? target.parentElement : null;
     return isDomElement(parent) ? parent : null;
+  }
+
+  function eventPathContainsStatusBarControl(event) {
+    if (!event || typeof event.composedPath !== 'function') return false;
+    const path = event.composedPath();
+    if (!Array.isArray(path)) return false;
+    for (const node of path) {
+      if (!isDomElement(node)) continue;
+      if (node.tagName === 'BUTTON') return true;
+      if (node.classList?.contains(STATUS_BAR_SETTINGS_BUTTON_CLASS)) return true;
+      if (node.classList?.contains(STATUS_BAR_TOGGLE_BUTTON_CLASS)) return true;
+    }
+    return false;
   }
 
   function unbindStatusBarDragDocEvents(doc) {
@@ -768,6 +1195,7 @@
     const bar = event.currentTarget;
     if (!isDomElement(bar)) return;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
+    if (eventPathContainsStatusBarControl(event)) return;
     const target = getEventTargetElement(event);
     if (
       isDomElement(target)
@@ -895,6 +1323,12 @@
       textNode.className = STATUS_BAR_TEXT_CLASS;
     }
 
+    let dotsNode = bar.querySelector(`.${STATUS_BAR_DOTS_CLASS}`);
+    if (!dotsNode) {
+      dotsNode = hostDocument.createElement('span');
+      dotsNode.className = STATUS_BAR_DOTS_CLASS;
+    }
+
     let settingsButton = bar.querySelector(`.${STATUS_BAR_SETTINGS_BUTTON_CLASS}`);
     if (!settingsButton) {
       settingsButton = hostDocument.createElement('button');
@@ -902,10 +1336,14 @@
     settingsButton.type = 'button';
     settingsButton.className = STATUS_BAR_SETTINGS_BUTTON_CLASS;
     settingsButton.textContent = '设置';
+    settingsButton.style.pointerEvents = 'auto';
+    settingsButton.style.touchAction = 'manipulation';
+    settingsButton.removeEventListener('pointerdown', onStatusBarSettingsButtonPointerDown);
+    settingsButton.addEventListener('pointerdown', onStatusBarSettingsButtonPointerDown);
     settingsButton.removeEventListener('click', onStatusBarSettingsButtonClick);
     settingsButton.addEventListener('click', onStatusBarSettingsButtonClick);
 
-    bar.replaceChildren(toggleButton, textNode, settingsButton);
+    bar.replaceChildren(toggleButton, dotsNode, textNode, settingsButton);
 
     if (bar.parentElement !== body) {
       body.appendChild(bar);
@@ -916,7 +1354,7 @@
     return bar;
   }
 
-  function renderParallelStatusBar(text) {
+  function renderParallelStatusBar(text, options = {}) {
     if (!ensureStatusBarStyle()) {
       warn('并发状态栏样式注入失败，已跳过本次状态显示');
       return false;
@@ -929,8 +1367,11 @@
     }
 
     const toggleButton = bar.querySelector(`.${STATUS_BAR_TOGGLE_BUTTON_CLASS}`);
+    const dotsNode = bar.querySelector(`.${STATUS_BAR_DOTS_CLASS}`);
     const textNode = bar.querySelector(`.${STATUS_BAR_TEXT_CLASS}`) || bar;
     const settingsButton = bar.querySelector(`.${STATUS_BAR_SETTINGS_BUTTON_CLASS}`);
+    const simpleMode = isStatusBarSimpleMode();
+    bar.classList.toggle(STATUS_BAR_SIMPLE_MODE_CLASS, simpleMode);
     const isCollapsed = isStatusBarCollapsed();
     applyStatusBarCollapsedState(bar, isCollapsed);
     if (toggleButton) {
@@ -940,12 +1381,18 @@
     }
     if (settingsButton) {
       settingsButton.title = '打开设置';
+      settingsButton.textContent = simpleMode ? '⚙' : '设置';
+      settingsButton.setAttribute('aria-label', '打开设置');
     }
     const normalizedText = String(text || '').trim();
     const nextText = normalizedText || buildIdleStatusText();
     if (textNode.textContent !== nextText) {
       textNode.textContent = nextText;
     }
+    renderStatusBarDots(
+      dotsNode,
+      buildStatusDotStates(options.progress, options.job),
+    );
     if (!statusBarDragState && !normalizeStatusBarPosition(config?.status_bar_position)) {
       applyDefaultStatusBarPosition(bar);
     }
@@ -1026,7 +1473,7 @@
   function updateParallelStatusBar(job, progress) {
     if (!job) return false;
     const text = buildParallelStatusText(progress);
-    return renderParallelStatusBar(text);
+    return renderParallelStatusBar(text, { job, progress });
   }
 
   function removeJobStatusBar() {
@@ -1178,6 +1625,107 @@
     return Math.max(0, Math.min(MAX_MIN_REPLY_TOKENS, Math.floor(num)));
   }
 
+  function clampTemperature(value, fallback = DEFAULT_PARALLEL_TEMPERATURE) {
+    const num = Number(value);
+    if (Number.isFinite(num)) {
+      return Math.max(MIN_TEMPERATURE, Math.min(MAX_TEMPERATURE, num));
+    }
+
+    const fallbackNum = Number(fallback);
+    if (Number.isFinite(fallbackNum)) {
+      return Math.max(MIN_TEMPERATURE, Math.min(MAX_TEMPERATURE, fallbackNum));
+    }
+
+    return DEFAULT_PARALLEL_TEMPERATURE;
+  }
+
+  function normalizeParallelTemperatures(rawValue) {
+    if (!Array.isArray(rawValue)) {
+      return [];
+    }
+
+    const result = [];
+    for (const item of rawValue) {
+      const num = Number(item);
+      if (!Number.isFinite(num)) continue;
+      result.push(clampTemperature(num));
+    }
+    return result;
+  }
+
+  function getConfiguredParallelTemperatures() {
+    return normalizeParallelTemperatures(config?.parallel_temperatures ?? DEFAULT_CONFIG.parallel_temperatures);
+  }
+
+  function formatParallelTemperatures(values) {
+    return normalizeParallelTemperatures(values)
+      .map(item => String(item))
+      .join(', ');
+  }
+
+  function parseParallelTemperaturesInput(rawInput) {
+    const raw = String(rawInput ?? '').trim();
+    if (!raw) {
+      return { ok: true, values: [] };
+    }
+
+    const normalized = raw.replace(/[，、|]/g, ',');
+    const tokens = normalized.split(',').map(item => item.trim());
+    const values = [];
+
+    for (let i = 0; i < tokens.length; i += 1) {
+      const token = tokens[i];
+      if (!token) {
+        return { ok: false, error: `第 ${i + 1} 项为空，请删除多余逗号` };
+      }
+      const num = Number(token);
+      if (!Number.isFinite(num)) {
+        return { ok: false, error: `第 ${i + 1} 项不是数字：${token}` };
+      }
+      values.push(clampTemperature(num));
+    }
+
+    return { ok: true, values };
+  }
+
+  function getPayloadTemperature(payload) {
+    if (!payload || typeof payload !== 'object') {
+      return null;
+    }
+
+    const candidates = [];
+    if (Object.prototype.hasOwnProperty.call(payload, 'temperature')) {
+      candidates.push(payload.temperature);
+    }
+    if (Object.prototype.hasOwnProperty.call(payload, 'temprature')) {
+      candidates.push(payload.temprature);
+    }
+
+    for (const candidate of candidates) {
+      const num = Number(candidate);
+      if (Number.isFinite(num)) {
+        return clampTemperature(num);
+      }
+    }
+
+    return null;
+  }
+
+  function resolveParallelRequestTemperature(job, index) {
+    const configuredTemps = getConfiguredParallelTemperatures();
+    const configuredTemperature = configuredTemps[index - 1];
+    if (Number.isFinite(configuredTemperature)) {
+      return clampTemperature(configuredTemperature);
+    }
+
+    const foregroundTemperature = getPayloadTemperature(job?.basePayload);
+    if (Number.isFinite(foregroundTemperature)) {
+      return clampTemperature(foregroundTemperature);
+    }
+
+    return DEFAULT_PARALLEL_TEMPERATURE;
+  }
+
   function getConfiguredRetryCount() {
     return clampRetryCount(config?.retry_count ?? DEFAULT_429_RETRIES);
   }
@@ -1190,6 +1738,48 @@
     return clampMinReplyTokens(config?.min_reply_tokens ?? DEFAULT_MIN_REPLY_TOKENS);
   }
 
+  function normalizeWorldbookSwitcherConfig(rawConfig) {
+    const raw = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
+    const defaults = DEFAULT_CONFIG.worldbook_switcher;
+    const rawPanelState = raw.panelState && typeof raw.panelState === 'object' ? raw.panelState : {};
+    const entryUsageStats = {};
+
+    if (raw.entryUsageStats && typeof raw.entryUsageStats === 'object' && !Array.isArray(raw.entryUsageStats)) {
+      for (const [key, value] of Object.entries(raw.entryUsageStats)) {
+        if (!value || typeof value !== 'object') continue;
+        const count = Number(value.count);
+        const lastUsed = Number(value.lastUsed);
+        entryUsageStats[key] = {
+          count: Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0,
+          lastUsed: Number.isFinite(lastUsed) ? Math.max(0, Math.floor(lastUsed)) : 0,
+          name: typeof value.name === 'string' ? value.name : '',
+          worldbook: typeof value.worldbook === 'string' ? value.worldbook : '',
+          pinned: Boolean(value.pinned),
+        };
+      }
+    }
+
+    return {
+      simpleMode: typeof raw.simpleMode === 'boolean' ? raw.simpleMode : defaults.simpleMode,
+      favoriteWorldbooks: Array.isArray(raw.favoriteWorldbooks)
+        ? raw.favoriteWorldbooks.filter(item => typeof item === 'string')
+        : [...defaults.favoriteWorldbooks],
+      currentWorldbook: typeof raw.currentWorldbook === 'string' ? raw.currentWorldbook : defaults.currentWorldbook,
+      entryUsageStats,
+      panelState: {
+        allWorldbooks: typeof rawPanelState.allWorldbooks === 'boolean'
+          ? rawPanelState.allWorldbooks
+          : defaults.panelState.allWorldbooks,
+        frequentEntries: typeof rawPanelState.frequentEntries === 'boolean'
+          ? rawPanelState.frequentEntries
+          : defaults.panelState.frequentEntries,
+      },
+      pinnedWorldbooks: Array.isArray(raw.pinnedWorldbooks)
+        ? raw.pinnedWorldbooks.filter(item => typeof item === 'string')
+        : [...defaults.pinnedWorldbooks],
+    };
+  }
+
   function normalizeConfig(rawConfig) {
     const raw = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
     return {
@@ -1198,10 +1788,21 @@
       retry_count: clampRetryCount(raw.retry_count ?? DEFAULT_CONFIG.retry_count),
       retry_delay_ms: clampRetryDelayMs(raw.retry_delay_ms ?? DEFAULT_CONFIG.retry_delay_ms),
       min_reply_tokens: clampMinReplyTokens(raw.min_reply_tokens ?? DEFAULT_CONFIG.min_reply_tokens),
+      parallel_temperatures: normalizeParallelTemperatures(raw.parallel_temperatures ?? DEFAULT_CONFIG.parallel_temperatures),
       status_bar_position: normalizeStatusBarPosition(raw.status_bar_position ?? DEFAULT_CONFIG.status_bar_position),
       status_bar_collapsed: typeof raw.status_bar_collapsed === 'boolean'
         ? raw.status_bar_collapsed
         : DEFAULT_CONFIG.status_bar_collapsed,
+      status_bar_simple_mode: typeof raw.status_bar_simple_mode === 'boolean'
+        ? raw.status_bar_simple_mode
+        : DEFAULT_CONFIG.status_bar_simple_mode,
+      old_floor_swipe_enabled: typeof raw.old_floor_swipe_enabled === 'boolean'
+        ? raw.old_floor_swipe_enabled
+        : DEFAULT_CONFIG.old_floor_swipe_enabled,
+      worldbook_switcher_enabled: typeof raw.worldbook_switcher_enabled === 'boolean'
+        ? raw.worldbook_switcher_enabled
+        : DEFAULT_CONFIG.worldbook_switcher_enabled,
+      worldbook_switcher: normalizeWorldbookSwitcherConfig(raw.worldbook_switcher),
     };
   }
 
@@ -1214,17 +1815,22 @@
       return normalizeConfig(vars ? vars[CONFIG_KEY] : undefined);
     } catch (error) {
       warn('读取脚本变量失败，使用默认配置:', error);
-      return { ...DEFAULT_CONFIG };
+      return normalizeConfig(undefined);
     }
   }
 
-  function saveConfig() {
+  async function saveConfig() {
     try {
-      if (typeof insertOrAssignVariables !== 'function') return;
+      if (typeof insertOrAssignVariables !== 'function') return false;
       const scriptId = typeof getScriptId === 'function' ? getScriptId() : undefined;
-      insertOrAssignVariables({ [CONFIG_KEY]: config }, { type: 'script', script_id: scriptId });
+      const result = insertOrAssignVariables({ [CONFIG_KEY]: config }, { type: 'script', script_id: scriptId });
+      if (result && typeof result.then === 'function') {
+        await result;
+      }
+      return true;
     } catch (error) {
       warn('保存脚本变量失败:', error);
+      return false;
     }
   }
 
@@ -1268,52 +1874,6 @@
     }
 
     return wanted;
-  }
-
-  function armNormalParallelToken(reason = '') {
-    normalParallelArmExpireAt = Date.now() + NORMAL_PARALLEL_ARM_TTL_MS;
-    normalParallelArmTokenSeq += 1;
-    debug('并发武装令牌已设置', {
-      seq: normalParallelArmTokenSeq,
-      expireAt: normalParallelArmExpireAt,
-      ttlMs: NORMAL_PARALLEL_ARM_TTL_MS,
-      reason: String(reason || ''),
-    });
-  }
-
-  function clearNormalParallelToken(reason = '') {
-    if (normalParallelArmExpireAt <= 0) return;
-    normalParallelArmExpireAt = 0;
-    debug('并发武装令牌已清空', {
-      seq: normalParallelArmTokenSeq,
-      reason: String(reason || ''),
-    });
-  }
-
-  function consumeNormalParallelToken(reason = '') {
-    if (normalParallelArmExpireAt <= 0) {
-      return false;
-    }
-
-    const now = Date.now();
-    if (now > normalParallelArmExpireAt) {
-      debug('并发武装令牌已过期', {
-        seq: normalParallelArmTokenSeq,
-        now,
-        expireAt: normalParallelArmExpireAt,
-        reason: String(reason || ''),
-      });
-      normalParallelArmExpireAt = 0;
-      return false;
-    }
-
-    const consumedSeq = normalParallelArmTokenSeq;
-    normalParallelArmExpireAt = 0;
-    debug('并发武装令牌已消费', {
-      seq: consumedSeq,
-      reason: String(reason || ''),
-    });
-    return true;
   }
 
   function getSourceFromGenerateData(generateData) {
@@ -1454,7 +2014,6 @@
     manualSendLock = true;
 
     try {
-      clearNormalParallelToken('normal_send_new_round');
       const hostWindow = getHostWindow();
       const textarea = getHostDocument().querySelector('#send_textarea');
       if (!textarea) return;
@@ -1470,10 +2029,8 @@
       textarea.value = '';
       textarea.dispatchEvent(new hostWindow.Event('input', { bubbles: true }));
       textarea.dispatchEvent(new hostWindow.Event('change', { bubbles: true }));
-      armNormalParallelToken('normal_send_intercept');
       await triggerSlash('/trigger');
     } catch (error) {
-      clearNormalParallelToken('normal_send_intercept_failed');
       warn('普通发送接管失败，已放弃本次接管:', error);
       errorToast('普通发送接管失败，请重试一次');
     } finally {
@@ -1791,17 +2348,35 @@
     return Math.max(1, Math.ceil(normalized.length / 4));
   }
 
-  function buildSingleRequestPayload(basePayload) {
+  function buildSingleRequestPayload(basePayload, options = {}) {
     const payload = deepClone(basePayload || {});
     payload.stream = false;
     payload.n = 1;
+
+    const overrideTemperature = Number(options.temperatureOverride);
+    if (Number.isFinite(overrideTemperature)) {
+      const nextTemperature = clampTemperature(overrideTemperature);
+      const hasTemperature = Object.prototype.hasOwnProperty.call(payload, 'temperature');
+      const hasTemprature = Object.prototype.hasOwnProperty.call(payload, 'temprature');
+
+      if (hasTemperature || !hasTemprature) {
+        payload.temperature = nextTemperature;
+      }
+      if (hasTemprature) {
+        payload.temprature = nextTemperature;
+      }
+      if (!hasTemperature && hasTemprature) {
+        payload.temperature = nextTemperature;
+      }
+    }
+
     return payload;
   }
 
   async function requestSingleCompletionWithRetry(options = {}) {
     const requestName = String(options.requestName || '请求');
     const retryScope = String(options.retryScope || requestName);
-    const payload = buildSingleRequestPayload(options.payload);
+    const payload = buildSingleRequestPayload(options.payload, options.payloadOptions);
     const signal = options.signal;
     const maxRetries = getConfiguredRetryCount();
     const retryDelayMs = getConfiguredRetryDelayMs();
@@ -1920,14 +2495,24 @@
   }
 
   async function runOneParallelRequest(job, index) {
-    const payload = buildSingleRequestPayload(job.basePayload);
+    const requestTemperature = resolveParallelRequestTemperature(job, index);
+    const source = job?.basePayload?.chat_completion_source || job?.basePayload?.chat_comletion_source;
     const startedAt = Date.now();
-    debug('并发子请求开始', { jobId: job?.id, index, model: payload?.model, source: payload?.chat_completion_source || payload?.chat_comletion_source });
+    debug('并发子请求开始', {
+      jobId: job?.id,
+      index,
+      model: job?.basePayload?.model,
+      source,
+      temperature: requestTemperature,
+    });
 
     const controller = new AbortController();
     job.controllers.push(controller);
     const result = await requestSingleCompletionWithRetry({
-      payload,
+      payload: job.basePayload,
+      payloadOptions: {
+        temperatureOverride: requestTemperature,
+      },
       signal: controller.signal,
       requestName: `请求 #${index}`,
       retryScope: `并发#${index}`,
@@ -1940,6 +2525,7 @@
       textLength: result.text.length,
       tokenCount: result.tokenCount,
       attempts: result.attempts,
+      temperature: requestTemperature,
     });
     return result.text;
   }
@@ -2033,12 +2619,25 @@
     return latestMessages[latestMessages.length - 1] || null;
   }
 
+  function normalizeMessageId(value) {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    if (typeof value === 'string' && value.trim() === '') {
+      return null;
+    }
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric < 0) {
+      return null;
+    }
+    return Math.floor(numeric);
+  }
+
   function resolveTargetMessageId(rawEndedValue) {
     const candidateIds = [];
-    const rawNumeric = Number(rawEndedValue);
+    const baseId = normalizeMessageId(rawEndedValue);
 
-    if (Number.isFinite(rawNumeric)) {
-      const baseId = Math.floor(rawNumeric);
+    if (baseId !== null) {
       candidateIds.push(baseId - 1);
       candidateIds.push(baseId);
     }
@@ -2131,8 +2730,8 @@
     const latestMessageId = Number(latestMessage?.message_id);
     const latestIsUser = Boolean(latestMessage && latestMessage.role === 'user' && Number.isFinite(latestMessageId));
 
-    const eventMessageId = Number(job.targetMessageIdFromEvent);
-    if (Number.isFinite(eventMessageId) && eventMessageId >= 0) {
+    const eventMessageId = normalizeMessageId(job.targetMessageIdFromEvent);
+    if (eventMessageId !== null) {
       const eventMessage = readMessageById(eventMessageId, true);
       if (
         eventMessage
@@ -2339,9 +2938,9 @@
       return resolvedId;
     }
 
-    const rawNumeric = Number(rawEndedValue);
-    if (!Number.isFinite(rawNumeric)) return null;
-    const candidates = [Math.floor(rawNumeric), Math.floor(rawNumeric) - 1];
+    const baseId = normalizeMessageId(rawEndedValue);
+    if (baseId === null) return null;
+    const candidates = [baseId, baseId - 1];
     for (const candidate of candidates) {
       if (!Number.isFinite(candidate) || candidate < 0) continue;
       const message = readMessageById(candidate, true);
@@ -2780,20 +3379,27 @@
           }
 
           let appended = false;
-          let targetMessageId = Number(job.targetMessageId);
+          const preferredTargetMessageId = target.mode === 'append_assistant'
+            ? normalizeMessageId(target.messageId)
+            : null;
+          let targetMessageId = preferredTargetMessageId ?? normalizeMessageId(job.targetMessageId);
 
-          if (Number.isFinite(targetMessageId) && targetMessageId >= 0) {
+          if (targetMessageId !== null) {
             appended = await appendSwipes(targetMessageId, [nextText]);
           } else if (target.mode === 'append_assistant') {
-            targetMessageId = Number(target.messageId);
-            appended = await appendSwipes(targetMessageId, [nextText]);
+            debug('tryFinalizeJob 跳过写入：append_assistant 目标 message_id 无效', {
+              jobId: job.id,
+              target,
+              writeIndex,
+            });
+            appended = false;
           } else if (target.mode === 'create_after_user') {
             const created = await createAssistantMessageWithSwipes(job, [nextText]);
             appended = Boolean(created?.appended);
-            targetMessageId = Number(created?.messageId);
+            targetMessageId = normalizeMessageId(created?.messageId);
           }
 
-          if (Number.isFinite(targetMessageId) && targetMessageId >= 0) {
+          if (targetMessageId !== null) {
             job.messageId = targetMessageId;
             job.targetMessageId = targetMessageId;
           }
@@ -2929,7 +3535,7 @@
   function onChatCompletionSettingsReady(generateData) {
     const generationType = ALLOWED_TYPES.has(lastGenerationType) ? lastGenerationType : 'normal';
     const source = getSourceFromGenerateData(generateData) || getCurrentSource();
-    const allowUiFallback = generationType === 'normal';
+    const allowUiFallback = true;
     const desiredN = getDesiredN(generateData, { allowUiFallback });
 
     debug('收到 CHAT_COMPLETION_SETTINGS_READY', {
@@ -2945,14 +3551,6 @@
     try {
       if (activeJob && !isJobTerminal(activeJob)) {
         debug('跳过本次并发初始化：已有进行中任务', { activeJob: summarizeJob(activeJob) });
-        return;
-      }
-
-      if (generationType === 'normal' && !consumeNormalParallelToken('settings_ready_normal')) {
-        debug('跳过本次并发初始化：normal 未命中手动发送武装令牌', {
-          source,
-          desiredN,
-        });
         return;
       }
 
@@ -3143,6 +3741,2506 @@
     }
   }
 
+  // =====================================================================
+  //  第3部分：旧楼层 Swipe 模块
+  // =====================================================================
+  const oldFloorSwipeModule = (() => {
+    const SWIPE_TAG = '[SWIPE]';
+    const STYLE_ID = 'old-floor-swipe-custom-styles';
+    const STREAM_UPDATE_INTERVAL = 100;
+    let initialized = false;
+    let isGenerating = false;
+    let currentStreamingMessageId = null;
+    let lastStreamUpdateTime = 0;
+    let pendingStreamText = '';
+    let streamUpdateTimer = null;
+    let scanTimer = null;
+    let streamHandlerBound = false;
+
+    function getDoc() {
+      return getHostDocument();
+    }
+
+    function logSwipe(...args) {
+      console.log(SWIPE_TAG, ...args);
+    }
+
+    function warnSwipe(...args) {
+      console.warn(SWIPE_TAG, ...args);
+    }
+
+    function errorSwipe(...args) {
+      console.error(SWIPE_TAG, ...args);
+    }
+
+    function ensureStyles() {
+      const doc = getDoc();
+      if (!doc) return false;
+      if (doc.getElementById(STYLE_ID)) return true;
+
+      const style = doc.createElement('style');
+      style.id = STYLE_ID;
+      style.textContent = `
+        .old-floor-swipe-container {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-top: 8px;
+          padding: 4px 0;
+        }
+        .old-floor-swipe-btn {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 28px;
+          height: 28px;
+          border-radius: 4px;
+          background: rgba(255,255,255,0.1);
+          color: var(--SmartThemeBodyColor, #fff);
+          cursor: pointer;
+          border: 1px solid rgba(255,255,255,0.2);
+          font-size: 14px;
+          transition: all 0.2s;
+        }
+        .old-floor-swipe-btn:hover {
+          background: rgba(255,255,255,0.2);
+          border-color: rgba(255,255,255,0.4);
+        }
+        .old-floor-swipe-btn:active {
+          transform: scale(0.95);
+        }
+        .old-floor-swipe-counter {
+          font-size: 12px;
+          color: var(--SmartThemeQuoteColor, #888);
+          min-width: 30px;
+          text-align: center;
+        }
+        .old-floor-swipe-btn.is-loading {
+          pointer-events: none;
+          opacity: 0.7;
+        }
+        .old-floor-swipe-btn.is-loading i {
+          animation: old-floor-swipe-spin 1s linear infinite;
+        }
+        @keyframes old-floor-swipe-spin {
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
+        }
+      `;
+      (doc.head || doc.body)?.appendChild(style);
+      return true;
+    }
+
+    function removeStyles() {
+      const doc = getDoc();
+      const style = doc?.getElementById(STYLE_ID);
+      if (style) style.remove();
+    }
+
+    function removeButtons() {
+      const doc = getDoc();
+      if (!doc) return;
+      doc.querySelectorAll('.old-floor-swipe-container').forEach(node => node.remove());
+    }
+
+    function updateStreamingMessage(streamedText) {
+      if (currentStreamingMessageId === null) return;
+      if (typeof setChatMessages !== 'function') return;
+      try {
+        setChatMessages([{ message_id: currentStreamingMessageId, message: streamedText }], {
+          refresh: 'affected',
+        });
+      } catch (error) {
+        errorSwipe('更新消息失败:', error);
+      }
+    }
+
+    function flushStreamUpdate() {
+      if (streamUpdateTimer) {
+        clearTimeout(streamUpdateTimer);
+        streamUpdateTimer = null;
+      }
+      if (pendingStreamText && currentStreamingMessageId !== null) {
+        updateStreamingMessage(pendingStreamText);
+      }
+      pendingStreamText = '';
+      lastStreamUpdateTime = 0;
+    }
+
+    function onStreamTokenReceived(text) {
+      try {
+        if (currentStreamingMessageId === null) return;
+        if (typeof setChatMessages !== 'function') return;
+
+        const streamedText = (text || '').toString();
+        pendingStreamText = streamedText;
+        const now = Date.now();
+        const timeSinceLastUpdate = now - lastStreamUpdateTime;
+
+        if (timeSinceLastUpdate >= STREAM_UPDATE_INTERVAL) {
+          updateStreamingMessage(streamedText);
+          lastStreamUpdateTime = now;
+          if (streamUpdateTimer) {
+            clearTimeout(streamUpdateTimer);
+            streamUpdateTimer = null;
+          }
+          return;
+        }
+
+        if (!streamUpdateTimer) {
+          streamUpdateTimer = setTimeout(() => {
+            if (pendingStreamText && currentStreamingMessageId !== null) {
+              updateStreamingMessage(pendingStreamText);
+              lastStreamUpdateTime = Date.now();
+            }
+            streamUpdateTimer = null;
+          }, STREAM_UPDATE_INTERVAL - timeSinceLastUpdate);
+        }
+      } catch (error) {
+        errorSwipe('流式处理失败:', error);
+      }
+    }
+
+    function bindEvents() {
+      if (streamHandlerBound) return;
+      if (typeof iframe_events === 'undefined' || !iframe_events.STREAM_TOKEN_RECEIVED_FULLY) {
+        debug('旧楼层 Swipe: STREAM_TOKEN_RECEIVED_FULLY 不可用，跳过流式绑定');
+        return;
+      }
+      bindEvent(iframe_events.STREAM_TOKEN_RECEIVED_FULLY, onStreamTokenReceived);
+      streamHandlerBound = true;
+      logSwipe('全局流式 handler 已注册');
+    }
+
+    function applyEnabledRegexes(text) {
+      if (typeof getTavernRegexes !== 'function') {
+        warnSwipe('getTavernRegexes 不可用，跳过正则处理');
+        return text;
+      }
+
+      try {
+        const regexes = getTavernRegexes({ enable_state: 'enabled' });
+        let result = text;
+        for (const regex of regexes) {
+          try {
+            const pattern = new RegExp(regex.find_regex, 'gm');
+            result = result.replace(pattern, regex.replace_string);
+          } catch (error) {
+            warnSwipe(`正则 "${regex.script_name}" 应用失败:`, error);
+          }
+        }
+        return result;
+      } catch (error) {
+        errorSwipe('正则处理失败:', error);
+        return text;
+      }
+    }
+
+    async function swipeLeft(messageId, updateUI) {
+      if (isGenerating) return;
+      try {
+        const msgs = getChatMessages(messageId, { include_swipes: true });
+        if (!msgs || msgs.length === 0) return;
+        const msg = msgs[0];
+        if (msg.swipe_id > 0) {
+          await setChatMessages([{ message_id: messageId, swipe_id: msg.swipe_id - 1 }], {
+            refresh: 'affected',
+          });
+          if (typeof updateUI === 'function') setTimeout(updateUI, 100);
+        }
+      } catch (error) {
+        errorSwipe('左切换失败:', error);
+      }
+    }
+
+    async function swipeRight(messageId, updateUI, rightBtn) {
+      if (isGenerating) return;
+      try {
+        const msgs = getChatMessages(messageId, { include_swipes: true });
+        if (!msgs || msgs.length === 0) return;
+        const msg = msgs[0];
+        if (msg.swipe_id < msg.swipes.length - 1) {
+          await setChatMessages([{ message_id: messageId, swipe_id: msg.swipe_id + 1 }], {
+            refresh: 'affected',
+          });
+          if (typeof updateUI === 'function') setTimeout(updateUI, 100);
+        } else {
+          if (rightBtn) {
+            rightBtn.classList.add('is-loading');
+            rightBtn.innerHTML = '<i class="fa-solid fa-spinner"></i>';
+          }
+          try {
+            await generateNewSwipe(messageId, updateUI);
+          } finally {
+            if (rightBtn) {
+              rightBtn.classList.remove('is-loading');
+              rightBtn.innerHTML = '<i class="fa-solid fa-chevron-right"></i>';
+            }
+          }
+        }
+      } catch (error) {
+        errorSwipe('右切换失败:', error);
+      }
+    }
+
+    async function generateNewSwipe(messageId, updateUI) {
+      isGenerating = true;
+      try {
+        const msgs = getChatMessages(messageId, { include_swipes: true });
+        if (!msgs || msgs.length === 0) {
+          throw new Error('未找到目标楼层');
+        }
+        const msg = msgs[0];
+        const oldSwipes = Array.isArray(msg.swipes) ? msg.swipes : [];
+        const newSwipes = [...oldSwipes, ''];
+        const newSwipeId = newSwipes.length - 1;
+        await setChatMessages([{
+          message_id: messageId,
+          swipes: newSwipes,
+          swipe_id: newSwipeId,
+        }], { refresh: 'affected' });
+
+        currentStreamingMessageId = messageId;
+        bindEvents();
+
+        let chatPrompts = [];
+        if (messageId > 0) {
+          const historyMsgs = getChatMessages(`0-${messageId - 1}`);
+          chatPrompts = historyMsgs.map(message => ({
+            role: message.role,
+            content: message.message,
+          }));
+        }
+
+        const result = await generate({
+          should_stream: true,
+          overrides: {
+            chat_history: {
+              with_depth_entries: true,
+              prompts: chatPrompts,
+            },
+          },
+        });
+
+        flushStreamUpdate();
+        if (result) {
+          const processedResult = applyEnabledRegexes(result);
+          const updatedMsgs = getChatMessages(messageId, { include_swipes: true });
+          if (updatedMsgs && updatedMsgs.length > 0) {
+            const updatedSwipes = Array.isArray(updatedMsgs[0].swipes) ? [...updatedMsgs[0].swipes] : [];
+            updatedSwipes[newSwipeId] = processedResult;
+            await setChatMessages([{
+              message_id: messageId,
+              swipes: updatedSwipes,
+              swipe_id: newSwipeId,
+            }], { refresh: 'affected' });
+          }
+        }
+
+        if (typeof updateUI === 'function') setTimeout(updateUI, 100);
+      } catch (error) {
+        errorSwipe('生成失败:', error);
+      } finally {
+        isGenerating = false;
+        currentStreamingMessageId = null;
+      }
+    }
+
+    function addSwipeButtonsToMessage(mesElement) {
+      const messageId = parseInt(mesElement?.getAttribute('mesid') || '', 10);
+      if (!Number.isFinite(messageId)) return;
+      if (mesElement.getAttribute('is_user') === 'true') return;
+      if (mesElement.classList.contains('last_mes')) return;
+      if (mesElement.querySelector('.old-floor-swipe-container')) return;
+
+      let swipeInfo = { current: 1, total: 1 };
+      try {
+        const msgs = getChatMessages(messageId, { include_swipes: true });
+        if (msgs && msgs.length > 0) {
+          const msg = msgs[0];
+          const swipes = Array.isArray(msg.swipes) ? msg.swipes : [''];
+          const swipeId = Number.isFinite(Number(msg.swipe_id)) ? Number(msg.swipe_id) : 0;
+          swipeInfo = { current: swipeId + 1, total: Math.max(1, swipes.length) };
+        }
+      } catch {
+        // ignore
+      }
+
+      const doc = getDoc();
+      if (!doc) return;
+      const container = doc.createElement('div');
+      container.className = 'old-floor-swipe-container';
+
+      const leftBtn = doc.createElement('div');
+      leftBtn.className = 'old-floor-swipe-btn';
+      leftBtn.innerHTML = '<i class="fa-solid fa-chevron-left"></i>';
+      leftBtn.title = '上一个回复';
+
+      const counter = doc.createElement('span');
+      counter.className = 'old-floor-swipe-counter';
+      counter.textContent = `${swipeInfo.current}/${swipeInfo.total}`;
+
+      const rightBtn = doc.createElement('div');
+      rightBtn.className = 'old-floor-swipe-btn';
+      rightBtn.innerHTML = '<i class="fa-solid fa-chevron-right"></i>';
+      rightBtn.title = '下一个回复 / 生成新回复';
+
+      const updateUI = () => {
+        try {
+          const msgs = getChatMessages(messageId, { include_swipes: true });
+          if (msgs && msgs.length > 0) {
+            const msg = msgs[0];
+            const swipes = Array.isArray(msg.swipes) ? msg.swipes : [''];
+            const swipeId = Number.isFinite(Number(msg.swipe_id)) ? Number(msg.swipe_id) : 0;
+            counter.textContent = `${swipeId + 1}/${Math.max(1, swipes.length)}`;
+          }
+        } catch {
+          // ignore
+        }
+      };
+
+      leftBtn.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        void swipeLeft(messageId, updateUI);
+      });
+
+      rightBtn.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        void swipeRight(messageId, updateUI, rightBtn);
+      });
+
+      container.append(leftBtn, counter, rightBtn);
+      const mesBlock = mesElement.querySelector('.mes_block');
+      if (mesBlock) {
+        mesBlock.appendChild(container);
+      }
+    }
+
+    function scanAndAddButtons() {
+      if (!initialized) return;
+      const doc = getDoc();
+      if (!doc) return;
+      doc.querySelectorAll('.mes:not(.last_mes)').forEach(addSwipeButtonsToMessage);
+    }
+
+    function scheduleScan() {
+      if (!initialized) return;
+      if (scanTimer) return;
+      scanTimer = setTimeout(() => {
+        scanTimer = null;
+        scanAndAddButtons();
+      }, 50);
+    }
+
+    function init() {
+      if (initialized) return;
+      initialized = true;
+      ensureStyles();
+      bindEvents();
+      scanAndAddButtons();
+      logSwipe('旧楼层 Swipe 模块已初始化');
+    }
+
+    function destroy() {
+      initialized = false;
+      isGenerating = false;
+      currentStreamingMessageId = null;
+      streamHandlerBound = false;
+      flushStreamUpdate();
+      if (scanTimer) {
+        clearTimeout(scanTimer);
+        scanTimer = null;
+      }
+      removeButtons();
+      removeStyles();
+    }
+
+    return {
+      init,
+      destroy,
+      bindEvents,
+      scheduleScan,
+    };
+  })();
+
+  function initOldFloorSwipe() {
+    oldFloorSwipeModule.init();
+  }
+
+  function destroyOldFloorSwipe() {
+    oldFloorSwipeModule.destroy();
+  }
+
+  function bindOldFloorSwipeEvents() {
+    oldFloorSwipeModule.bindEvents();
+  }
+
+  function scheduleOldFloorSwipeScan() {
+    oldFloorSwipeModule.scheduleScan();
+  }
+
+  // =====================================================================
+  //  第4部分：世界书快捷切换模块
+  // =====================================================================
+  const worldbookSwitcherModule = (() => {
+  console.log('[WorldbookSwitcher] 插件开始执行...');
+  const SCRIPT_ID = 'worldbook-switcher-plugin';
+  const LEGACY_CONFIG_KEY = 'worldbook_switcher_config';
+
+  // 获取父页面的document和jQuery（脚本运行在iframe中）
+  const parentDoc = getHostDocument();
+  const $ = getHostWindow().$;
+
+  let worldbookInitialized = false;
+  let worldbookDestroyed = false;
+  let worldbookLegacyConfigMigrated = false;
+  let worldbookSetupRetryTimer = null;
+  let worldbookNativeIcon = null;
+  let worldbookNativeIconClickHandler = null;
+  let worldbookPanelObserver = null;
+  const worldbookTimeoutHandles = new Set();
+
+  function scheduleWorldbookTimeout(callback, delay) {
+    const timer = setTimeout(() => {
+      worldbookTimeoutHandles.delete(timer);
+      callback();
+    }, delay);
+    worldbookTimeoutHandles.add(timer);
+    return timer;
+  }
+
+  function clearWorldbookTimeouts() {
+    for (const timer of worldbookTimeoutHandles) {
+      clearTimeout(timer);
+    }
+    worldbookTimeoutHandles.clear();
+  }
+
+
+  // =============================================================================
+  // 配置管理
+  // =============================================================================
+  function getWorldbookSwitcherConfig() {
+    return normalizeWorldbookSwitcherConfig(config?.worldbook_switcher);
+  }
+
+  function saveWorldbookSwitcherConfig(nextConfig) {
+    config = normalizeConfig({
+      ...config,
+      worldbook_switcher: normalizeWorldbookSwitcherConfig(nextConfig),
+    });
+    saveConfig();
+  }
+
+  function migrateLegacyWorldbookConfigIfNeeded() {
+    if (worldbookLegacyConfigMigrated) return;
+    worldbookLegacyConfigMigrated = true;
+
+    let storage = null;
+    try {
+      storage = getHostWindow()?.localStorage || window.localStorage;
+    } catch {
+      storage = null;
+    }
+    if (!storage || typeof storage.getItem !== 'function') return;
+
+    let legacyRaw = '';
+    try {
+      legacyRaw = storage.getItem(LEGACY_CONFIG_KEY) || '';
+    } catch (error) {
+      console.warn('[WorldbookSwitcher] 读取旧 localStorage 配置失败:', error);
+      return;
+    }
+    if (!legacyRaw) return;
+
+    try {
+      const legacyConfig = JSON.parse(legacyRaw);
+      const current = normalizeWorldbookSwitcherConfig(config?.worldbook_switcher);
+      const merged = normalizeWorldbookSwitcherConfig({
+        ...current,
+        ...legacyConfig,
+        panelState: {
+          ...current.panelState,
+          ...(legacyConfig?.panelState || {}),
+        },
+      });
+      config = normalizeConfig({
+        ...config,
+        worldbook_switcher: merged,
+      });
+      saveConfig();
+      storage.removeItem(LEGACY_CONFIG_KEY);
+      console.log('[WorldbookSwitcher] 已迁移旧 localStorage 配置到脚本变量');
+    } catch (error) {
+      console.warn('[WorldbookSwitcher] 迁移旧配置失败:', error);
+    }
+  }
+
+  // =============================================================================
+  // 工具函数
+  // =============================================================================
+  function truncateText(text, maxChars = 20) {
+    if (!text) return '';
+    let count = 0;
+    let result = '';
+    for (const char of text) {
+      const charWidth = /[\u4e00-\u9fa5]/.test(char) ? 2 : 1;
+      if (count + charWidth > maxChars * 2) {
+        return result + '...';
+      }
+      count += charWidth;
+      result += char;
+    }
+    return result;
+  }
+
+  function escapeHtml(text) {
+    if (!text) return '';
+    const div = parentDoc.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  // 检测是否为移动端
+  function isMobileDevice() {
+    return getHostWindow().innerWidth < 768;
+  }
+
+  // =============================================================================
+  // 世界书API封装
+  // =============================================================================
+  async function getAllWorldbooks() {
+    try {
+      if (typeof getWorldbookNames === 'function') {
+        return getWorldbookNames();
+      }
+    } catch (e) {
+      console.error('[WorldbookSwitcher] 获取世界书列表失败:', e);
+    }
+    return [];
+  }
+
+  async function getGlobalWorldbooks() {
+    try {
+      if (typeof getGlobalWorldbookNames === 'function') {
+        const result = getGlobalWorldbookNames();
+        console.log('[WorldbookSwitcher] 获取全局世界书:', result);
+        return Array.isArray(result) ? result : [];
+      }
+    } catch (e) {
+      console.error('[WorldbookSwitcher] 获取全局世界书失败:', e);
+    }
+    return [];
+  }
+
+  async function getWorldbookEntries(worldbookName) {
+    try {
+      if (typeof getWorldbook === 'function') {
+        return await getWorldbook(worldbookName);
+      }
+    } catch (e) {
+      console.error('[WorldbookSwitcher] 获取世界书条目失败:', e);
+    }
+    return [];
+  }
+
+  async function updateWorldbookEntries(worldbookName, entries) {
+    try {
+      if (typeof replaceWorldbook === 'function') {
+        await replaceWorldbook(worldbookName, entries, { render: 'immediate' });
+        return true;
+      }
+    } catch (e) {
+      console.error('[WorldbookSwitcher] 更新世界书条目失败:', e);
+    }
+    return false;
+  }
+
+  // 记录条目使用统计
+  function recordEntryUsage(worldbookName, uid, entryName) {
+    const config = getWorldbookSwitcherConfig();
+    const key = `${worldbookName}:${uid}`;
+    if (!config.entryUsageStats[key]) {
+      config.entryUsageStats[key] = { count: 0, lastUsed: 0, name: '', worldbook: worldbookName };
+    }
+    config.entryUsageStats[key].count++;
+    config.entryUsageStats[key].lastUsed = Date.now();
+    config.entryUsageStats[key].name = entryName || config.entryUsageStats[key].name;
+    config.entryUsageStats[key].worldbook = worldbookName;
+    saveWorldbookSwitcherConfig(config);
+  }
+
+  // 获取常用条目列表（置顶优先，然后按使用次数排序）
+  function getFrequentEntries(limit = 30) {
+    const config = getWorldbookSwitcherConfig();
+    const entries = Object.entries(config.entryUsageStats)
+      .map(([key, data]) => {
+        const [worldbook, uid] = key.split(':');
+        return { key, worldbook, uid: parseInt(uid), pinned: data.pinned || false, ...data };
+      })
+      .sort((a, b) => {
+        // 置顶的排在前面
+        if (a.pinned && !b.pinned) return -1;
+        if (!a.pinned && b.pinned) return 1;
+        // 同级别按使用次数排序
+        return b.count - a.count;
+      })
+      .slice(0, limit);
+    return entries;
+  }
+
+  // 置顶条目
+  function pinEntry(worldbookName, uid) {
+    const config = getWorldbookSwitcherConfig();
+    const key = `${worldbookName}:${uid}`;
+    if (config.entryUsageStats[key]) {
+      config.entryUsageStats[key].pinned = true;
+      saveWorldbookSwitcherConfig(config);
+    }
+  }
+
+  // 取消置顶
+  function unpinEntry(worldbookName, uid) {
+    const config = getWorldbookSwitcherConfig();
+    const key = `${worldbookName}:${uid}`;
+    if (config.entryUsageStats[key]) {
+      config.entryUsageStats[key].pinned = false;
+      saveWorldbookSwitcherConfig(config);
+    }
+  }
+
+  // 从历史中移除
+  function removeFromHistory(worldbookName, uid) {
+    const config = getWorldbookSwitcherConfig();
+    const key = `${worldbookName}:${uid}`;
+    delete config.entryUsageStats[key];
+    saveWorldbookSwitcherConfig(config);
+  }
+
+  // =============================================================================
+  // 状态管理
+  // =============================================================================
+  let currentState = {
+    selectedWorldbook: '',
+    entries: [],
+    isIntercepting: true, // 是否拦截原生图标点击
+  };
+
+  // =============================================================================
+  // 主题颜色自适应工具函数
+  // =============================================================================
+  
+  // 将颜色转换为不透明版本
+  function makeColorOpaque(color) {
+    if (!color) return null;
+    
+    // 解析 rgba/rgb 格式
+    if (color.startsWith('rgba')) {
+      const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*[\d.]+)?\)/);
+      if (match) {
+        return `rgb(${match[1]}, ${match[2]}, ${match[3]})`;
+      }
+    }
+    return color; // 其他格式直接返回
+  }
+  
+  function getThemeColors() {
+    // 从父页面获取计算后的CSS变量值
+    const computedStyle = parent.getComputedStyle(parentDoc.documentElement);
+    
+    // 获取主题相关颜色
+    const chatTintColor = computedStyle.getPropertyValue('--SmartThemeChatTintColor').trim() || 
+                          computedStyle.getPropertyValue('--SmartThemeBlurTintColor').trim();
+    const bodyColor = computedStyle.getPropertyValue('--SmartThemeBodyColor').trim();
+    const borderColor = computedStyle.getPropertyValue('--SmartThemeBorderColor').trim() || '#333';
+    
+    // 尝试解析背景色并计算亮度
+    let bgColor = chatTintColor || 'rgba(26, 26, 46, 1)'; // 默认深色
+    let textColor = bodyColor || '#fff';
+    
+    // 计算背景亮度来决定文字颜色
+    const isLightTheme = isColorLight(bgColor);
+    
+    // 将背景色转换为不透明版本
+    const opaqueBgColor = makeColorOpaque(bgColor) || (isLightTheme ? 'rgb(255, 255, 255)' : 'rgb(26, 26, 46)');
+    
+    return {
+      background: opaqueBgColor,
+      text: isLightTheme ? 'rgba(0, 0, 0, 0.89)' : 'rgba(255, 255, 255, 0.95)',
+      secondaryText: isLightTheme ? 'rgba(0, 0, 0, 0.6)' : 'rgba(255, 255, 255, 0.7)',
+      border: borderColor,
+      inputBg: isLightTheme ? 'rgb(245, 245, 245)' : 'rgb(42, 42, 62)',
+      inputText: isLightTheme ? 'rgba(0, 0, 0, 0.89)' : 'rgba(255, 255, 255, 0.95)',
+      hoverBg: isLightTheme ? 'rgba(139, 92, 246, 0.15)' : 'rgba(139, 92, 246, 0.25)',
+      isLight: isLightTheme
+    };
+  }
+
+  function isColorLight(color) {
+    // 解析颜色并计算亮度
+    let r, g, b, a = 1;
+    
+    if (color.startsWith('rgba')) {
+      const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+      if (match) {
+        r = parseInt(match[1]);
+        g = parseInt(match[2]);
+        b = parseInt(match[3]);
+        a = match[4] ? parseFloat(match[4]) : 1;
+      }
+    } else if (color.startsWith('rgb')) {
+      const match = color.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+      if (match) {
+        r = parseInt(match[1]);
+        g = parseInt(match[2]);
+        b = parseInt(match[3]);
+      }
+    } else if (color.startsWith('#')) {
+      const hex = color.slice(1);
+      if (hex.length === 3) {
+        r = parseInt(hex[0] + hex[0], 16);
+        g = parseInt(hex[1] + hex[1], 16);
+        b = parseInt(hex[2] + hex[2], 16);
+      } else {
+        r = parseInt(hex.slice(0, 2), 16);
+        g = parseInt(hex.slice(2, 4), 16);
+        b = parseInt(hex.slice(4, 6), 16);
+      }
+    }
+    
+    if (r === undefined) return false; // 默认深色主题
+    
+    // 考虑透明度 - 如果背景是半透明的白色，也应该被认为是浅色
+    // 计算相对亮度 (YIQ公式)
+    const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+    
+    // 如果亮度高于128，认为是浅色主题
+    return brightness > 128;
+  }
+
+  // =============================================================================
+  // 显示简易模式菜单（从原生图标下方弹出）
+  // =============================================================================
+  async function showSimpleMenu() {
+    // 移动端使用滑动切换模式
+    if (isMobileDevice()) {
+      return showMobileMenu();
+    }
+    
+    // 如果已存在，先移除所有面板并保存状态
+    if ($('#worldbook-switcher-simple-menu', parentDoc).length) {
+      // 保存面板状态 - 保持当前状态用于记忆
+      // (面板关闭时不重置状态，让用户下次打开时恢复)
+      
+      $('#worldbook-switcher-simple-menu', parentDoc).remove();
+      $('#wb-all-worldbooks-panel', parentDoc).remove();
+      $('#wb-frequent-entries-panel', parentDoc).remove();
+      $(parentDoc).off('.wbsimplemenu');
+      return;
+    }
+
+    const config = getWorldbookSwitcherConfig();
+    
+    // 获取自适应主题颜色
+    const themeColors = getThemeColors();
+
+    // 获取原生世界信息图标的位置（在父页面中）
+    const $wiIcon = $('#WIDrawerIcon', parentDoc);
+    if (!$wiIcon.length) {
+      console.error('[WorldbookSwitcher] 未找到原生世界信息图标');
+      return;
+    }
+
+    const iconRect = $wiIcon[0].getBoundingClientRect();
+
+    // 每次打开菜单都获取最新的世界书状态
+    console.log('[WorldbookSwitcher] 正在获取最新世界书状态...');
+    const allWorldbooks = await getAllWorldbooks();
+    const globalWbs = await getGlobalWorldbooks();
+    console.log('[WorldbookSwitcher] 所有世界书:', allWorldbooks);
+    console.log('[WorldbookSwitcher] 已启用的世界书:', globalWbs);
+
+    // 如果没有选中的世界书，或当前选中的不在已启用列表中，使用第一个全局世界书
+    if (!currentState.selectedWorldbook || !globalWbs.includes(currentState.selectedWorldbook)) {
+      currentState.selectedWorldbook = globalWbs[0] || '';
+    }
+
+    // 加载条目
+    let entries = [];
+    if (currentState.selectedWorldbook) {
+      entries = await getWorldbookEntries(currentState.selectedWorldbook);
+      currentState.entries = entries;
+    }
+
+    // 显示所有条目
+    const displayEntries = entries;
+
+    // 计算菜单位置（图标下方）
+    const menuTop = iconRect.bottom + 8;
+    const menuLeft = Math.max(10, iconRect.left - 100); // 向左偏移一些，确保不超出屏幕
+
+    // 生成世界书选项HTML（只显示已启用的世界书）
+    const worldbookOptionsHtml = globalWbs.map(wb => `
+      <option value="${escapeHtml(wb)}" ${currentState.selectedWorldbook === wb ? 'selected' : ''}>
+        ${escapeHtml(wb)}
+      </option>
+    `).join('');
+
+    const menuHtml = `
+      <div id="worldbook-switcher-simple-menu" style="
+        position: fixed;
+        top: ${menuTop}px;
+        left: ${menuLeft}px;
+        z-index: 10000;
+        background: ${themeColors.background};
+        border: 1px solid ${themeColors.border};
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0,0,0,${themeColors.isLight ? '0.15' : '0.6'});
+        min-width: 280px;
+        max-width: 320px;
+        max-height: 400px;
+        display: flex;
+        flex-direction: column;
+        color: ${themeColors.text};
+      ">
+        <!-- 标题栏 -->
+        <div style="
+          padding: 10px 12px;
+          border-bottom: 1px solid ${themeColors.border};
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          flex-shrink: 0;
+          gap: 8px;
+        ">
+          <!-- 左侧：全部世界书按钮 -->
+          <button id="wb-all-worldbooks-btn" title="全部世界书" style="
+            background: linear-gradient(135deg, #3B82F6 0%, #2563EB 100%);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 4px 8px;
+            cursor: pointer;
+            font-size: 0.75em;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            flex-shrink: 0;
+          ">
+            <i class="fa-solid fa-book"></i>
+          </button>
+          <select id="wb-worldbook-selector" style="
+            flex: 1;
+            padding: 4px 8px;
+            border: 1px solid ${themeColors.border};
+            border-radius: 4px;
+            background: ${themeColors.inputBg};
+            color: ${themeColors.inputText};
+            font-size: 0.8em;
+            cursor: pointer;
+            min-width: 0;
+          ">
+            ${globalWbs.length === 0 ? '<option value="">无已启用的世界书</option>' : worldbookOptionsHtml}
+          </select>
+          <div style="display: flex; gap: 6px; align-items: center; flex-shrink: 0;">
+            <!-- 常用条目历史按钮 -->
+            <button id="wb-frequent-entries-btn" title="常用条目历史" style="
+              background: linear-gradient(135deg, #F59E0B 0%, #D97706 100%);
+              color: white;
+              border: none;
+              border-radius: 4px;
+              padding: 4px 8px;
+              cursor: pointer;
+              font-size: 0.75em;
+              display: flex;
+              align-items: center;
+              gap: 4px;
+            ">
+              <i class="fa-solid fa-star"></i>
+            </button>
+            <!-- 切换到完整模式按钮 -->
+            <button id="wb-switch-to-full-btn" title="切换到完整模式（使用原生界面）" style="
+              background: linear-gradient(135deg, #8B5CF6 0%, #7C3AED 100%);
+              color: white;
+              border: none;
+              border-radius: 4px;
+              padding: 4px 8px;
+              cursor: pointer;
+              font-size: 0.75em;
+              display: flex;
+              align-items: center;
+              gap: 4px;
+            ">
+              <i class="fa-solid fa-expand"></i> 完整
+            </button>
+            <button id="wb-simple-close-btn" title="关闭" style="
+              background: none;
+              border: none;
+              color: ${themeColors.text};
+              cursor: pointer;
+              padding: 4px;
+              font-size: 14px;
+            ">
+              <i class="fa-solid fa-times"></i>
+            </button>
+          </div>
+        </div>
+
+        <!-- 条目列表 -->
+        <div id="wb-simple-entries" style="
+          flex: 1;
+          overflow-y: auto;
+          padding: 6px;
+        ">
+          ${displayEntries.length === 0 ?
+            `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无条目</div>` :
+            displayEntries.map((entry, idx) => {
+              const displayName = entry.name || truncateText(entry.content, 15) || '(无标题)';
+              return `
+                <div class="wb-simple-entry" data-uid="${entry.uid}" style="
+                  display: flex;
+                  align-items: center;
+                  gap: 8px;
+                  padding: 6px 8px;
+                  border-radius: 4px;
+                  cursor: pointer;
+                  font-size: 0.8em;
+                  ${!entry.enabled ? 'opacity: 0.5;' : ''}
+                  transition: background 0.15s;
+                " onmouseover="this.style.background='rgba(139,92,246,0.15)'" onmouseout="this.style.background='transparent'">
+                  <label style="
+                    position: relative;
+                    display: inline-block;
+                    width: 32px;
+                    height: 18px;
+                    flex-shrink: 0;
+                    cursor: pointer;
+                  ">
+                    <input type="checkbox" class="wb-simple-toggle" data-uid="${entry.uid}"
+                      ${entry.enabled ? 'checked' : ''}
+                      style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
+                    <span style="
+                      position: absolute;
+                      top: 0;
+                      left: 0;
+                      right: 0;
+                      bottom: 0;
+                      background-color: ${entry.enabled ? '#10B981' : '#6B7280'};
+                      transition: 0.3s;
+                      border-radius: 18px;
+                      pointer-events: none;
+                    "></span>
+                    <span style="
+                      position: absolute;
+                      height: 14px;
+                      width: 14px;
+                      left: ${entry.enabled ? '16px' : '2px'};
+                      bottom: 2px;
+                      background-color: white;
+                      transition: 0.3s;
+                      border-radius: 50%;
+                      pointer-events: none;
+                    "></span>
+                  </label>
+                  <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    ${escapeHtml(displayName)}
+                  </span>
+                </div>
+              `;
+            }).join('')
+          }
+        </div>
+        <!-- 搜索框 -->
+        <div style="padding: 6px; border-top: 1px solid ${themeColors.border}; flex-shrink: 0;">
+          <input type="text" id="wb-simple-search-entries" placeholder="搜索条目..." style="
+            width: 100%; padding: 6px 10px; border: 1px solid ${themeColors.border}; border-radius: 4px;
+            background: ${themeColors.inputBg}; color: ${themeColors.inputText}; font-size: 0.8em; box-sizing: border-box;
+          ">
+        </div>
+      </div>
+    `;
+
+    $('body', parentDoc).append(menuHtml);
+
+    // 绑定事件
+    $('#wb-simple-close-btn', parentDoc).on('click', function(e) {
+      e.stopPropagation();
+      // 关闭所有面板（不重置状态，保持记忆功能）
+      $('#worldbook-switcher-simple-menu', parentDoc).remove();
+      $('#wb-all-worldbooks-panel', parentDoc).remove();
+      $('#wb-frequent-entries-panel', parentDoc).remove();
+      $(parentDoc).off('.wbsimplemenu');
+    });
+
+    // 切换到完整模式按钮
+    $('#wb-switch-to-full-btn', parentDoc).on('click', function(e) {
+      e.stopPropagation();
+
+      // 更新配置为完整模式
+      const config = getWorldbookSwitcherConfig();
+      config.simpleMode = false;
+      saveWorldbookSwitcherConfig(config);
+
+      // 更新拦截状态
+      currentState.isIntercepting = false;
+
+      // 关闭所有面板
+      $('#worldbook-switcher-simple-menu', parentDoc).remove();
+      $('#wb-all-worldbooks-panel', parentDoc).remove();
+      $('#wb-frequent-entries-panel', parentDoc).remove();
+      $(parentDoc).off('.wbsimplemenu');
+
+      // 触发原生图标点击，打开原生界面
+      const $wiIcon = $('#WIDrawerIcon', parentDoc);
+      if ($wiIcon.length) {
+        $wiIcon[0].click();
+      }
+
+    });
+
+    // 世界书选择器变化事件
+    $('#wb-worldbook-selector', parentDoc).on('change', async function(e) {
+      e.stopPropagation();
+      const selectedWb = $(this).val();
+      if (selectedWb && selectedWb !== currentState.selectedWorldbook) {
+        currentState.selectedWorldbook = selectedWb;
+
+        // 重新加载条目
+        const entries = await getWorldbookEntries(selectedWb);
+        currentState.entries = entries;
+
+        // 获取自适应主题颜色
+        const themeColors = getThemeColors();
+
+        // 更新条目列表UI
+        const $entriesContainer = $('#wb-simple-entries', parentDoc);
+        if (entries.length === 0) {
+          $entriesContainer.html(`<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无条目</div>`);
+        } else {
+          const entriesHtml = entries.map((entry) => {
+            const displayName = entry.name || truncateText(entry.content, 15) || '(无标题)';
+            return `
+              <div class="wb-simple-entry" data-uid="${entry.uid}" style="
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                padding: 6px 8px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 0.8em;
+                ${!entry.enabled ? 'opacity: 0.5;' : ''}
+                transition: background 0.15s;
+              " onmouseover="this.style.background='rgba(139,92,246,0.15)'" onmouseout="this.style.background='transparent'">
+                <label style="
+                  position: relative;
+                  display: inline-block;
+                  width: 32px;
+                  height: 18px;
+                  flex-shrink: 0;
+                  cursor: pointer;
+                ">
+                  <input type="checkbox" class="wb-simple-toggle" data-uid="${entry.uid}"
+                    ${entry.enabled ? 'checked' : ''}
+                    style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
+                  <span style="
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    right: 0;
+                    bottom: 0;
+                    background-color: ${entry.enabled ? '#10B981' : '#6B7280'};
+                    transition: 0.3s;
+                    border-radius: 18px;
+                    pointer-events: none;
+                  "></span>
+                  <span style="
+                    position: absolute;
+                    height: 14px;
+                    width: 14px;
+                    left: ${entry.enabled ? '16px' : '2px'};
+                    bottom: 2px;
+                    background-color: white;
+                    transition: 0.3s;
+                    border-radius: 50%;
+                    pointer-events: none;
+                  "></span>
+                </label>
+                <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  ${escapeHtml(displayName)}
+                </span>
+              </div>
+            `;
+          }).join('');
+          $entriesContainer.html(entriesHtml);
+        }
+      }
+    });
+
+    // 条目开关切换
+    $('#worldbook-switcher-simple-menu', parentDoc).on('click', '.wb-simple-toggle', async function(e) {
+      e.stopPropagation();
+      const $checkbox = $(this);
+      const uid = parseInt($checkbox.data('uid'));
+      const enabled = $checkbox.is(':checked');
+
+      console.log('[WorldbookSwitcher] 简易模式条目开关切换:', uid, enabled);
+
+      const entry = currentState.entries.find(e => e.uid === uid);
+      if (entry) {
+        entry.enabled = enabled;
+        await updateWorldbookEntries(currentState.selectedWorldbook, currentState.entries);
+
+        // 记录使用统计
+        recordEntryUsage(currentState.selectedWorldbook, uid, entry.name || truncateText(entry.content, 15));
+
+        // 更新UI
+        const $entryDiv = $checkbox.closest('.wb-simple-entry');
+        $entryDiv.css('opacity', enabled ? '1' : '0.5');
+        $checkbox.siblings('span').first().css('background-color', enabled ? '#10B981' : '#6B7280');
+        $checkbox.siblings('span').last().css('left', enabled ? '16px' : '2px');
+
+      }
+    });
+
+    // 全部世界书按钮点击事件
+    $('#wb-all-worldbooks-btn', parentDoc).on('click', function(e) {
+      e.stopPropagation();
+      showAllWorldbooksPanel();
+    });
+
+    // 常用条目历史按钮点击事件
+    $('#wb-frequent-entries-btn', parentDoc).on('click', function(e) {
+      e.stopPropagation();
+      showFrequentEntriesPanel();
+    });
+
+    // 根据保存的面板状态自动打开面板
+    const panelConfig = getWorldbookSwitcherConfig();
+    if (panelConfig.panelState && panelConfig.panelState.allWorldbooks) {
+      scheduleWorldbookTimeout(() => showAllWorldbooksPanel(), 50);
+    }
+    if (panelConfig.panelState && panelConfig.panelState.frequentEntries) {
+      scheduleWorldbookTimeout(() => showFrequentEntriesPanel(), 50);
+    }
+
+    // 搜索功能 - 简易菜单条目
+    $('#wb-simple-search-entries', parentDoc).on('input', function() {
+      const keyword = $(this).val().toLowerCase().trim();
+      $('#wb-simple-entries .wb-simple-entry', parentDoc).each(function() {
+        const name = $(this).find('span').last().text().toLowerCase();
+        $(this).toggle(name.includes(keyword));
+      });
+    });
+
+    // 点击外部关闭
+    scheduleWorldbookTimeout(() => {
+      $(parentDoc).on('click.wbsimplemenu', function(e) {
+        if (!$(e.target).closest('#worldbook-switcher-simple-menu, #WIDrawerIcon, #wb-all-worldbooks-panel, #wb-frequent-entries-panel').length) {
+          // 不重置面板状态，保持记忆功能
+          
+          $('#worldbook-switcher-simple-menu', parentDoc).remove();
+          $('#wb-all-worldbooks-panel', parentDoc).remove();
+          $('#wb-frequent-entries-panel', parentDoc).remove();
+          $(parentDoc).off('.wbsimplemenu');
+        }
+      });
+    }, 100);
+  }
+
+  // =============================================================================
+  // 显示全部世界书面板（左侧滑出）
+  // =============================================================================
+  async function showAllWorldbooksPanel() {
+    // 如果已存在，先移除并保存状态为关闭
+    if ($('#wb-all-worldbooks-panel', parentDoc).length) {
+      $('#wb-all-worldbooks-panel', parentDoc).remove();
+      const config = getWorldbookSwitcherConfig();
+      config.panelState = config.panelState || {};
+      config.panelState.allWorldbooks = false;
+      saveWorldbookSwitcherConfig(config);
+      return;
+    }
+
+    // 保存状态为打开
+    const config = getWorldbookSwitcherConfig();
+    config.panelState = config.panelState || {};
+    config.panelState.allWorldbooks = true;
+    saveWorldbookSwitcherConfig(config);
+
+    const themeColors = getThemeColors();
+    
+    // 每次打开面板都获取最新状态
+    console.log('[WorldbookSwitcher] 左侧面板: 正在获取最新世界书状态...');
+    const allWorldbooks = await getAllWorldbooks();
+    const globalWbs = await getGlobalWorldbooks();
+    console.log('[WorldbookSwitcher] 左侧面板: 所有世界书:', allWorldbooks);
+    console.log('[WorldbookSwitcher] 左侧面板: 已启用的世界书:', globalWbs);
+
+    // 获取简易菜单的位置作为参考
+    const $simpleMenu = $('#worldbook-switcher-simple-menu', parentDoc);
+    const menuRect = $simpleMenu.length ? $simpleMenu[0].getBoundingClientRect() : { top: 100, left: 300, height: 400 };
+
+    // 对世界书列表排序 - 置顶的排在前面
+    const sortedWorldbooks = [...allWorldbooks].sort((a, b) => {
+      const aPinned = config.pinnedWorldbooks && config.pinnedWorldbooks.includes(a);
+      const bPinned = config.pinnedWorldbooks && config.pinnedWorldbooks.includes(b);
+      if (aPinned && !bPinned) return -1;
+      if (!aPinned && bPinned) return 1;
+      return 0;
+    });
+
+    const panelHtml = `
+      <div id="wb-all-worldbooks-panel" style="
+        position: fixed;
+        top: ${menuRect.top}px;
+        left: ${menuRect.left - 260}px;
+        z-index: 10001;
+        background: ${themeColors.background};
+        border: 1px solid ${themeColors.border};
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0,0,0,${themeColors.isLight ? '0.15' : '0.6'});
+        width: 250px;
+        height: ${menuRect.height}px;
+        display: flex;
+        flex-direction: column;
+        color: ${themeColors.text};
+        animation: slideInLeft 0.2s ease-out;
+      ">
+        <style>
+          @keyframes slideInLeft {
+            from { transform: translateX(-20px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+          }
+        </style>
+        <!-- 标题栏 -->
+        <div style="
+          padding: 10px 12px;
+          border-bottom: 1px solid ${themeColors.border};
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          flex-shrink: 0;
+        ">
+          <span style="font-weight: 600; font-size: 0.9em;">
+            <i class="fa-solid fa-book" style="margin-right: 6px;"></i>全部世界书
+          </span>
+          <button id="wb-all-worldbooks-close" title="关闭" style="
+            background: none;
+            border: none;
+            color: ${themeColors.text};
+            cursor: pointer;
+            padding: 4px;
+            font-size: 14px;
+          ">
+            <i class="fa-solid fa-times"></i>
+          </button>
+        </div>
+        <!-- 世界书列表 -->
+        <div id="wb-all-worldbooks-list" style="
+          flex: 1;
+          overflow-y: auto;
+          padding: 6px;
+        ">
+          ${sortedWorldbooks.length === 0 ?
+            `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无世界书</div>` :
+            sortedWorldbooks.map(wb => {
+              const isEnabled = globalWbs.includes(wb);
+              const isPinned = config.pinnedWorldbooks && config.pinnedWorldbooks.includes(wb);
+              return `
+                <div class="wb-worldbook-item" data-name="${escapeHtml(wb)}" style="
+                  display: flex;
+                  align-items: center;
+                  gap: 8px;
+                  padding: 6px 8px;
+                  border-radius: 4px;
+                  cursor: pointer;
+                  font-size: 0.8em;
+                  ${!isEnabled ? 'opacity: 0.5;' : ''}
+                  transition: background 0.15s;
+                " onmouseover="this.style.background='rgba(59,130,246,0.15)'" onmouseout="this.style.background='transparent'">
+                  <label style="
+                    position: relative;
+                    display: inline-block;
+                    width: 32px;
+                    height: 18px;
+                    flex-shrink: 0;
+                    cursor: pointer;
+                  ">
+                    <input type="checkbox" class="wb-worldbook-toggle" data-name="${escapeHtml(wb)}"
+                      ${isEnabled ? 'checked' : ''}
+                      style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
+                    <span style="
+                      position: absolute;
+                      top: 0;
+                      left: 0;
+                      right: 0;
+                      bottom: 0;
+                      background-color: ${isEnabled ? '#3B82F6' : '#6B7280'};
+                      transition: 0.3s;
+                      border-radius: 18px;
+                      pointer-events: none;
+                    "></span>
+                    <span style="
+                      position: absolute;
+                      height: 14px;
+                      width: 14px;
+                      left: ${isEnabled ? '16px' : '2px'};
+                      bottom: 2px;
+                      background-color: white;
+                      transition: 0.3s;
+                      border-radius: 50%;
+                      pointer-events: none;
+                    "></span>
+                  </label>
+                  <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                    ${isPinned ? '<i class="fa-solid fa-thumbtack" style="color: #3B82F6; margin-right: 4px; font-size: 0.8em;"></i>' : ''}${escapeHtml(wb)}
+                  </span>
+                  <button class="wb-worldbook-pin" data-name="${escapeHtml(wb)}" data-pinned="${isPinned}" title="${isPinned ? '取消置顶' : '置顶'}" style="
+                    background: ${isPinned ? 'linear-gradient(135deg, #3B82F6 0%, #2563EB 100%)' : 'transparent'};
+                    color: ${isPinned ? 'white' : themeColors.secondaryText};
+                    border: ${isPinned ? 'none' : '1px solid ' + themeColors.border};
+                    border-radius: 4px;
+                    padding: 2px 6px;
+                    cursor: pointer;
+                    font-size: 0.7em;
+                    flex-shrink: 0;
+                  ">
+                    <i class="fa-solid fa-thumbtack"></i>
+                  </button>
+                </div>
+              `;
+            }).join('')
+          }
+        </div>
+        <!-- 搜索框 -->
+        <div style="padding: 6px; border-top: 1px solid ${themeColors.border}; flex-shrink: 0;">
+          <input type="text" id="wb-desktop-search-worldbooks" placeholder="搜索世界书..." style="
+            width: 100%; padding: 6px 10px; border: 1px solid ${themeColors.border}; border-radius: 4px;
+            background: ${themeColors.inputBg}; color: ${themeColors.inputText}; font-size: 0.8em; box-sizing: border-box;
+          ">
+        </div>
+      </div>
+    `;
+
+    $('body', parentDoc).append(panelHtml);
+
+    // 关闭按钮
+    $('#wb-all-worldbooks-close', parentDoc).on('click', function(e) {
+      e.stopPropagation();
+      const config = getWorldbookSwitcherConfig();
+      config.panelState = config.panelState || {};
+      config.panelState.allWorldbooks = false;
+      saveWorldbookSwitcherConfig(config);
+      $('#wb-all-worldbooks-panel', parentDoc).remove();
+    });
+
+    // 世界书开关切换
+    $('#wb-all-worldbooks-panel', parentDoc).on('click', '.wb-worldbook-toggle', async function(e) {
+      e.stopPropagation();
+      const $checkbox = $(this);
+      const wbName = $checkbox.data('name');
+      const enabled = $checkbox.is(':checked');
+
+      console.log('[WorldbookSwitcher] 世界书开关切换:', wbName, enabled);
+
+      // 使用 rebindGlobalWorldbooks API 切换世界书
+      try {
+        const currentGlobalWbs = await getGlobalWorldbooks();
+        let newGlobalWbs;
+        
+        if (enabled) {
+          // 启用世界书 - 添加到列表
+          if (!currentGlobalWbs.includes(wbName)) {
+            newGlobalWbs = [...currentGlobalWbs, wbName];
+          } else {
+            newGlobalWbs = currentGlobalWbs;
+          }
+        } else {
+          // 禁用世界书 - 从列表移除
+          newGlobalWbs = currentGlobalWbs.filter(wb => wb !== wbName);
+        }
+        
+        // 调用API重新绑定
+        console.log('[WorldbookSwitcher] 正在绑定新的世界书列表:', newGlobalWbs);
+        if (typeof rebindGlobalWorldbooks === 'function') {
+          await rebindGlobalWorldbooks(newGlobalWbs);
+        }
+
+        // 更新UI
+        const $itemDiv = $checkbox.closest('.wb-worldbook-item');
+        $itemDiv.css('opacity', enabled ? '1' : '0.5');
+        $checkbox.siblings('span').first().css('background-color', enabled ? '#3B82F6' : '#6B7280');
+        $checkbox.siblings('span').last().css('left', enabled ? '16px' : '2px');
+
+        // 轮询检测3次，等待API状态同步
+        let latestGlobalWbs = [];
+        for (let i = 0; i < 3; i++) {
+          await new Promise(resolve => scheduleWorldbookTimeout(resolve, 200));
+          latestGlobalWbs = await getGlobalWorldbooks();
+          console.log(`[WorldbookSwitcher] 第${i + 1}次检测，当前全局世界书:`, latestGlobalWbs);
+          
+          // 检查状态是否符合预期
+          const hasWorldbook = latestGlobalWbs.includes(wbName);
+          if ((enabled && hasWorldbook) || (!enabled && !hasWorldbook)) {
+            console.log('[WorldbookSwitcher] 状态已同步');
+            break;
+          }
+        }
+
+        // 刷新简易菜单的世界书选择器
+        const $selector = $('#wb-worldbook-selector', parentDoc);
+        if ($selector.length) {
+          const currentValue = $selector.val();
+          $selector.html(latestGlobalWbs.length === 0 ?
+            '<option value="">无已启用的世界书</option>' :
+            latestGlobalWbs.map(wb => `
+              <option value="${escapeHtml(wb)}" ${currentValue === wb ? 'selected' : ''}>
+                ${escapeHtml(wb)}
+              </option>
+            `).join('')
+          );
+        }
+
+      } catch (err) {
+        console.error('[WorldbookSwitcher] 切换世界书失败:', err);
+      }
+    });
+
+    // 世界书置顶按钮
+    $('#wb-all-worldbooks-panel', parentDoc).on('click', '.wb-worldbook-pin', function(e) {
+      e.stopPropagation();
+      const $btn = $(this);
+      const wbName = $btn.data('name');
+      const isPinned = $btn.data('pinned') === true || $btn.data('pinned') === 'true';
+      const config = getWorldbookSwitcherConfig();
+      if (!config.pinnedWorldbooks) config.pinnedWorldbooks = [];
+      if (isPinned) {
+        config.pinnedWorldbooks = config.pinnedWorldbooks.filter(wb => wb !== wbName);
+      } else {
+        if (!config.pinnedWorldbooks.includes(wbName)) config.pinnedWorldbooks.push(wbName);
+      }
+      saveWorldbookSwitcherConfig(config);
+      // 刷新面板
+      $('#wb-all-worldbooks-panel', parentDoc).remove();
+      showAllWorldbooksPanel();
+    });
+
+    // 世界书搜索功能
+    $('#wb-desktop-search-worldbooks', parentDoc).on('input', function() {
+      const keyword = $(this).val().toLowerCase().trim();
+      $('#wb-all-worldbooks-list .wb-worldbook-item', parentDoc).each(function() {
+        const name = $(this).data('name').toLowerCase();
+        $(this).toggle(name.includes(keyword));
+      });
+    });
+  }
+
+  // =============================================================================
+  // 显示常用条目历史面板（右侧滑出）
+  // =============================================================================
+  async function showFrequentEntriesPanel() {
+    // 如果已存在，先移除并保存状态为关闭
+    if ($('#wb-frequent-entries-panel', parentDoc).length) {
+      $('#wb-frequent-entries-panel', parentDoc).remove();
+      const config = getWorldbookSwitcherConfig();
+      config.panelState = config.panelState || {};
+      config.panelState.frequentEntries = false;
+      saveWorldbookSwitcherConfig(config);
+      return;
+    }
+
+    // 保存状态为打开
+    const config = getWorldbookSwitcherConfig();
+    config.panelState = config.panelState || {};
+    config.panelState.frequentEntries = true;
+    saveWorldbookSwitcherConfig(config);
+
+    const themeColors = getThemeColors();
+    const frequentEntries = getFrequentEntries(30);
+
+    // 获取每个条目的当前启用状态
+    const entriesWithState = [];
+    const worldbookCache = {};
+    for (const entry of frequentEntries) {
+      if (!worldbookCache[entry.worldbook]) {
+        try {
+          worldbookCache[entry.worldbook] = await getWorldbookEntries(entry.worldbook);
+        } catch (e) {
+          worldbookCache[entry.worldbook] = [];
+        }
+      }
+      const wbEntry = worldbookCache[entry.worldbook].find(e => e.uid === entry.uid);
+      entriesWithState.push({
+        ...entry,
+        enabled: wbEntry ? wbEntry.enabled : false
+      });
+    }
+
+    // 获取简易菜单的位置作为参考
+    const $simpleMenu = $('#worldbook-switcher-simple-menu', parentDoc);
+    const menuRect = $simpleMenu.length ? $simpleMenu[0].getBoundingClientRect() : { top: 100, right: 100, height: 400 };
+
+    const panelHtml = `
+      <div id="wb-frequent-entries-panel" style="
+        position: fixed;
+        top: ${menuRect.top}px;
+        left: ${menuRect.right + 10}px;
+        z-index: 10001;
+        background: ${themeColors.background};
+        border: 1px solid ${themeColors.border};
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0,0,0,${themeColors.isLight ? '0.15' : '0.6'});
+        width: 280px;
+        height: ${menuRect.height}px;
+        display: flex;
+        flex-direction: column;
+        color: ${themeColors.text};
+        animation: slideInRight 0.2s ease-out;
+      ">
+        <style>
+          @keyframes slideInRight {
+            from { transform: translateX(20px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+          }
+        </style>
+        <!-- 标题栏 -->
+        <div style="
+          padding: 10px 12px;
+          border-bottom: 1px solid ${themeColors.border};
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          flex-shrink: 0;
+        ">
+          <span style="font-weight: 600; font-size: 0.9em;">
+            <i class="fa-solid fa-star" style="margin-right: 6px; color: #F59E0B;"></i>常用条目
+          </span>
+          <button id="wb-frequent-entries-close" title="关闭" style="
+            background: none;
+            border: none;
+            color: ${themeColors.text};
+            cursor: pointer;
+            padding: 4px;
+            font-size: 14px;
+          ">
+            <i class="fa-solid fa-times"></i>
+          </button>
+        </div>
+        <!-- 条目列表 -->
+        <div id="wb-frequent-entries-list" style="
+          flex: 1;
+          overflow-y: auto;
+          padding: 6px;
+        ">
+          ${entriesWithState.length === 0 ?
+            `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无使用记录<br><span style="font-size: 0.8em;">开关条目后会在此显示</span></div>` :
+            entriesWithState.map(entry => {
+              return `
+                <div class="wb-frequent-entry" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" style="
+                  display: flex;
+                  align-items: center;
+                  gap: 8px;
+                  padding: 6px 8px;
+                  border-radius: 4px;
+                  cursor: pointer;
+                  font-size: 0.8em;
+                  ${!entry.enabled ? 'opacity: 0.5;' : ''}
+                  transition: background 0.15s;
+                " onmouseover="this.style.background='rgba(245,158,11,0.15)'" onmouseout="this.style.background='transparent'">
+                  <label style="
+                    position: relative;
+                    display: inline-block;
+                    width: 32px;
+                    height: 18px;
+                    flex-shrink: 0;
+                    cursor: pointer;
+                  ">
+                    <input type="checkbox" class="wb-frequent-toggle" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}"
+                      ${entry.enabled ? 'checked' : ''}
+                      style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
+                    <span style="
+                      position: absolute;
+                      top: 0;
+                      left: 0;
+                      right: 0;
+                      bottom: 0;
+                      background-color: ${entry.enabled ? '#10B981' : '#6B7280'};
+                      transition: 0.3s;
+                      border-radius: 18px;
+                      pointer-events: none;
+                    "></span>
+                    <span style="
+                      position: absolute;
+                      height: 14px;
+                      width: 14px;
+                      left: ${entry.enabled ? '16px' : '2px'};
+                      bottom: 2px;
+                      background-color: white;
+                      transition: 0.3s;
+                      border-radius: 50%;
+                      pointer-events: none;
+                    "></span>
+                  </label>
+                  <div style="flex: 1; overflow: hidden; min-width: 0;">
+                    <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                      ${entry.pinned ? '<i class="fa-solid fa-thumbtack" style="color: #F59E0B; margin-right: 4px; font-size: 0.8em;"></i>' : ''}${escapeHtml(entry.name || '(无标题)')}
+                    </div>
+                    <div style="font-size: 0.75em; color: ${themeColors.secondaryText}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                      ${escapeHtml(entry.worldbook)}
+                    </div>
+                  </div>
+                  <div style="display: flex; gap: 4px; flex-shrink: 0;">
+                    <button class="wb-frequent-pin" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" data-pinned="${entry.pinned}" title="${entry.pinned ? '取消置顶' : '置顶'}" style="
+                      background: ${entry.pinned ? 'linear-gradient(135deg, #F59E0B 0%, #D97706 100%)' : 'transparent'};
+                      color: ${entry.pinned ? 'white' : themeColors.secondaryText};
+                      border: ${entry.pinned ? 'none' : '1px solid ' + themeColors.border};
+                      border-radius: 4px;
+                      padding: 2px 6px;
+                      cursor: pointer;
+                      font-size: 0.7em;
+                    ">
+                      <i class="fa-solid fa-thumbtack"></i>
+                    </button>
+                    <button class="wb-frequent-remove" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" title="从历史移除" style="
+                      background: transparent;
+                      color: ${themeColors.secondaryText};
+                      border: 1px solid ${themeColors.border};
+                      border-radius: 4px;
+                      padding: 2px 6px;
+                      cursor: pointer;
+                      font-size: 0.7em;
+                    ">
+                      <i class="fa-solid fa-trash"></i>
+                    </button>
+                  </div>
+                </div>
+              `;
+            }).join('')
+          }
+        </div>
+        <!-- 搜索框 -->
+        <div style="padding: 6px; border-top: 1px solid ${themeColors.border}; flex-shrink: 0;">
+          <input type="text" id="wb-desktop-search-frequent" placeholder="搜索常用条目..." style="
+            width: 100%; padding: 6px 10px; border: 1px solid ${themeColors.border}; border-radius: 4px;
+            background: ${themeColors.inputBg}; color: ${themeColors.inputText}; font-size: 0.8em; box-sizing: border-box;
+          ">
+        </div>
+      </div>
+    `;
+
+    $('body', parentDoc).append(panelHtml);
+
+    // 关闭按钮
+    $('#wb-frequent-entries-close', parentDoc).on('click', function(e) {
+      e.stopPropagation();
+      const config = getWorldbookSwitcherConfig();
+      config.panelState = config.panelState || {};
+      config.panelState.frequentEntries = false;
+      saveWorldbookSwitcherConfig(config);
+      $('#wb-frequent-entries-panel', parentDoc).remove();
+    });
+
+    // 条目开关切换
+    $('#wb-frequent-entries-panel', parentDoc).on('click', '.wb-frequent-toggle', async function(e) {
+      e.stopPropagation();
+      const $checkbox = $(this);
+      const worldbook = $checkbox.data('worldbook');
+      const uid = parseInt($checkbox.data('uid'));
+      const enabled = $checkbox.is(':checked');
+
+      console.log('[WorldbookSwitcher] 常用条目切换:', worldbook, uid, enabled);
+
+      try {
+        // 获取该世界书的条目
+        const entries = await getWorldbookEntries(worldbook);
+        const entry = entries.find(e => e.uid === uid);
+        
+        if (entry) {
+          // 设置状态
+          entry.enabled = enabled;
+          await updateWorldbookEntries(worldbook, entries);
+
+          // 记录使用
+          recordEntryUsage(worldbook, uid, entry.name || truncateText(entry.content, 15));
+
+          // 更新UI
+          const $entryDiv = $checkbox.closest('.wb-frequent-entry');
+          $entryDiv.css('opacity', enabled ? '1' : '0.5');
+          $checkbox.siblings('span').first().css('background-color', enabled ? '#10B981' : '#6B7280');
+          $checkbox.siblings('span').last().css('left', enabled ? '16px' : '2px');
+
+          // 如果当前简易菜单显示的是这个世界书，也更新其UI
+          if (currentState.selectedWorldbook === worldbook) {
+            const $toggle = $(`.wb-simple-toggle[data-uid="${uid}"]`, parentDoc);
+            if ($toggle.length) {
+              $toggle.prop('checked', enabled);
+              $toggle.closest('.wb-simple-entry').css('opacity', enabled ? '1' : '0.5');
+              $toggle.siblings('span').first().css('background-color', enabled ? '#10B981' : '#6B7280');
+              $toggle.siblings('span').last().css('left', enabled ? '16px' : '2px');
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[WorldbookSwitcher] 切换常用条目失败:', err);
+      }
+    });
+
+    // 置顶按钮点击
+    $('#wb-frequent-entries-panel', parentDoc).on('click', '.wb-frequent-pin', async function(e) {
+      e.stopPropagation();
+      const $btn = $(this);
+      const worldbook = $btn.data('worldbook');
+      const uid = parseInt($btn.data('uid'));
+      const isPinned = $btn.data('pinned') === true || $btn.data('pinned') === 'true';
+
+      console.log('[WorldbookSwitcher] 置顶操作:', worldbook, uid, '当前状态:', isPinned);
+
+      if (isPinned) {
+        unpinEntry(worldbook, uid);
+      } else {
+        pinEntry(worldbook, uid);
+      }
+
+      // 刷新面板
+      $('#wb-frequent-entries-panel', parentDoc).remove();
+      await showFrequentEntriesPanel();
+    });
+
+    // 移除按钮点击
+    $('#wb-frequent-entries-panel', parentDoc).on('click', '.wb-frequent-remove', function(e) {
+      e.stopPropagation();
+      const $btn = $(this);
+      const worldbook = $btn.data('worldbook');
+      const uid = parseInt($btn.data('uid'));
+
+      console.log('[WorldbookSwitcher] 从历史移除:', worldbook, uid);
+
+      removeFromHistory(worldbook, uid);
+
+      // 移除该条目DOM
+      $btn.closest('.wb-frequent-entry').fadeOut(200, function() {
+        $(this).remove();
+        // 如果没有条目了，显示空提示
+        if ($('#wb-frequent-entries-list .wb-frequent-entry', parentDoc).length === 0) {
+          const themeColors = getThemeColors();
+          $('#wb-frequent-entries-list', parentDoc).html(
+            `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无使用记录<br><span style="font-size: 0.8em;">开关条目后会在此显示</span></div>`
+          );
+        }
+      });
+    });
+
+    // 常用条目搜索功能
+    $('#wb-desktop-search-frequent', parentDoc).on('input', function() {
+      const keyword = $(this).val().toLowerCase().trim();
+      $('#wb-frequent-entries-list .wb-frequent-entry', parentDoc).each(function() {
+        const name = $(this).find('div > div').first().text().toLowerCase();
+        const worldbook = $(this).data('worldbook').toLowerCase();
+        $(this).toggle(name.includes(keyword) || worldbook.includes(keyword));
+      });
+    });
+  }
+
+  // =============================================================================
+  // 移动端滑动切换菜单 - 使用原来菜单的定位方式
+  // =============================================================================
+  async function showMobileMenu(initialTab = 1) {
+    // 如果已存在，先移除
+    if ($('#worldbook-switcher-mobile-menu', parentDoc).length) {
+      $('#worldbook-switcher-mobile-menu', parentDoc).remove();
+      $(parentDoc).off('.wbmobilemenu');
+      return;
+    }
+
+    const config = getWorldbookSwitcherConfig();
+    const themeColors = getThemeColors();
+    
+    // 获取原生世界信息图标的位置（和原来中间菜单一样）
+    const $wiIcon = $('#WIDrawerIcon', parentDoc);
+    if (!$wiIcon.length) {
+      console.error('[WorldbookSwitcher] 未找到原生世界信息图标');
+      return;
+    }
+    const iconRect = $wiIcon[0].getBoundingClientRect();
+    const menuTop = iconRect.bottom + 8;
+    const menuLeft = Math.max(10, iconRect.left - 100);
+    
+    // 获取数据
+    const allWorldbooks = await getAllWorldbooks();
+    const globalWbs = await getGlobalWorldbooks();
+    
+    if (!currentState.selectedWorldbook || !globalWbs.includes(currentState.selectedWorldbook)) {
+      currentState.selectedWorldbook = globalWbs[0] || '';
+    }
+    
+    let entries = [];
+    if (currentState.selectedWorldbook) {
+      entries = await getWorldbookEntries(currentState.selectedWorldbook);
+      currentState.entries = entries;
+    }
+
+    // 获取常用条目
+    const frequentEntries = getFrequentEntries(30);
+    const worldbookCache = {};
+    const entriesWithState = [];
+    for (const entry of frequentEntries) {
+      if (!worldbookCache[entry.worldbook]) {
+        try { worldbookCache[entry.worldbook] = await getWorldbookEntries(entry.worldbook); }
+        catch (e) { worldbookCache[entry.worldbook] = []; }
+      }
+      const wbEntry = worldbookCache[entry.worldbook].find(e => e.uid === entry.uid);
+      entriesWithState.push({ ...entry, enabled: wbEntry ? wbEntry.enabled : false });
+    }
+
+    // 对世界书列表排序 - 置顶的排在前面
+    const sortedWorldbooks = [...allWorldbooks].sort((a, b) => {
+      const aPinned = config.pinnedWorldbooks && config.pinnedWorldbooks.includes(a);
+      const bPinned = config.pinnedWorldbooks && config.pinnedWorldbooks.includes(b);
+      if (aPinned && !bPinned) return -1;
+      if (!aPinned && bPinned) return 1;
+      return 0;
+    });
+
+    // 生成世界书选项HTML
+    const worldbookOptionsHtml = globalWbs.map(wb => `
+      <option value="${escapeHtml(wb)}" ${currentState.selectedWorldbook === wb ? 'selected' : ''}>
+        ${escapeHtml(wb)}
+      </option>
+    `).join('');
+
+    // 使用和原来中间菜单一样的样式
+    const menuHtml = `
+      <div id="worldbook-switcher-mobile-menu" style="
+        position: fixed;
+        top: ${menuTop}px;
+        left: ${menuLeft}px;
+        z-index: 10000;
+        background: ${themeColors.background};
+        border: 1px solid ${themeColors.border};
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0,0,0,${themeColors.isLight ? '0.15' : '0.6'});
+        width: 300px;
+        height: 400px;
+        display: flex;
+        flex-direction: column;
+        color: ${themeColors.text};
+      ">
+        <!-- 顶部标签栏 -->
+        <div style="
+          padding: 6px;
+          border-bottom: 1px solid ${themeColors.border};
+          display: flex;
+          gap: 4px;
+          flex-shrink: 0;
+        ">
+          <button class="wb-mobile-tab" data-tab="0" style="
+            flex: 1; padding: 4px 6px; border: 1px solid ${themeColors.border}; border-radius: 4px;
+            background: transparent; color: ${themeColors.text}; cursor: pointer; font-size: 0.7em;
+          "><i class="fa-solid fa-book"></i> 世界书</button>
+          <button class="wb-mobile-tab active" data-tab="1" style="
+            flex: 1; padding: 4px 6px; border: 1px solid transparent; border-radius: 4px;
+            background: linear-gradient(135deg, #8B5CF6 0%, #7C3AED 100%); color: white; cursor: pointer; font-size: 0.7em;
+          "><i class="fa-solid fa-list"></i> 条目</button>
+          <button class="wb-mobile-tab" data-tab="2" style="
+            flex: 1; padding: 4px 6px; border: 1px solid ${themeColors.border}; border-radius: 4px;
+            background: transparent; color: ${themeColors.text}; cursor: pointer; font-size: 0.7em;
+          "><i class="fa-solid fa-star"></i> 常用</button>
+          <button id="wb-mobile-switch-full" title="切换到完整模式" style="
+            padding: 4px 6px; background: linear-gradient(135deg, #8B5CF6 0%, #7C3AED 100%); border: none; border-radius: 4px; color: white; cursor: pointer; font-size: 0.65em;
+          "><i class="fa-solid fa-expand"></i></button>
+          <button id="wb-mobile-close" style="
+            padding: 4px 6px; background: none; border: none; color: ${themeColors.text}; cursor: pointer;
+          "><i class="fa-solid fa-times"></i></button>
+        </div>
+
+        <!-- 面板0: 全部世界书 -->
+        <div id="wb-mobile-panel-0" style="display: none; flex-direction: column; flex: 1; overflow: hidden;">
+          <div id="wb-mobile-worldbooks-list" style="flex: 1; overflow-y: auto; padding: 6px;">
+            ${sortedWorldbooks.map(wb => {
+              const isEnabled = globalWbs.includes(wb);
+              const isPinned = config.pinnedWorldbooks && config.pinnedWorldbooks.includes(wb);
+              return `<div class="wb-mobile-worldbook" data-name="${escapeHtml(wb)}" style="
+                display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; font-size: 0.8em;
+                ${!isEnabled ? 'opacity: 0.5;' : ''} transition: background 0.15s;
+              " onmouseover="this.style.background='rgba(59,130,246,0.15)'" onmouseout="this.style.background='transparent'">
+                <label style="position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0; cursor: pointer;">
+                  <input type="checkbox" class="wb-mobile-worldbook-toggle" data-name="${escapeHtml(wb)}" ${isEnabled ? 'checked' : ''} style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
+                  <span style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: ${isEnabled ? '#3B82F6' : '#6B7280'}; transition: 0.3s; border-radius: 18px; pointer-events: none;"></span>
+                  <span style="position: absolute; height: 14px; width: 14px; left: ${isEnabled ? '16px' : '2px'}; bottom: 2px; background-color: white; transition: 0.3s; border-radius: 50%; pointer-events: none;"></span>
+                </label>
+                <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  ${isPinned ? '<i class="fa-solid fa-thumbtack" style="color: #3B82F6; margin-right: 4px; font-size: 0.8em;"></i>' : ''}${escapeHtml(wb)}
+                </span>
+                <button class="wb-mobile-worldbook-pin" data-name="${escapeHtml(wb)}" data-pinned="${isPinned}" title="${isPinned ? '取消置顶' : '置顶'}" style="
+                  background: ${isPinned ? 'linear-gradient(135deg, #3B82F6 0%, #2563EB 100%)' : 'transparent'};
+                  color: ${isPinned ? 'white' : themeColors.secondaryText};
+                  border: ${isPinned ? 'none' : '1px solid ' + themeColors.border};
+                  border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 0.7em;
+                "><i class="fa-solid fa-thumbtack"></i></button>
+              </div>`;
+            }).join('') || `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无世界书</div>`}
+          </div>
+          <div style="padding: 6px; border-top: 1px solid ${themeColors.border}; flex-shrink: 0;">
+            <input type="text" id="wb-mobile-search-worldbooks" placeholder="搜索世界书..." style="
+              width: 100%; padding: 6px 10px; border: 1px solid ${themeColors.border}; border-radius: 4px;
+              background: ${themeColors.inputBg}; color: ${themeColors.inputText}; font-size: 0.8em; box-sizing: border-box;
+            ">
+          </div>
+        </div>
+
+        <!-- 面板1: 条目列表 (默认显示) -->
+        <div id="wb-mobile-panel-1" style="display: flex; flex-direction: column; flex: 1; overflow: hidden;">
+          <div style="padding: 6px; flex-shrink: 0;">
+            <select id="wb-mobile-worldbook-selector" style="
+              width: 100%; padding: 4px 8px; border: 1px solid ${themeColors.border}; border-radius: 4px;
+              background: ${themeColors.inputBg}; color: ${themeColors.inputText}; font-size: 0.8em; cursor: pointer;
+            ">
+              ${globalWbs.length === 0 ? '<option value="">无已启用的世界书</option>' : worldbookOptionsHtml}
+            </select>
+          </div>
+          <div id="wb-mobile-entries-list" style="flex: 1; overflow-y: auto; padding: 0 6px 6px;">
+            ${entries.map(entry => {
+              const displayName = entry.name || truncateText(entry.content, 15) || '(无标题)';
+              return `<div class="wb-mobile-entry" data-uid="${entry.uid}" style="
+                display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; font-size: 0.8em;
+                ${!entry.enabled ? 'opacity: 0.5;' : ''} transition: background 0.15s;
+              " onmouseover="this.style.background='rgba(139,92,246,0.15)'" onmouseout="this.style.background='transparent'">
+                <label style="position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0; cursor: pointer;">
+                  <input type="checkbox" class="wb-mobile-entry-toggle" data-uid="${entry.uid}" ${entry.enabled ? 'checked' : ''} style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
+                  <span style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: ${entry.enabled ? '#10B981' : '#6B7280'}; transition: 0.3s; border-radius: 18px; pointer-events: none;"></span>
+                  <span style="position: absolute; height: 14px; width: 14px; left: ${entry.enabled ? '16px' : '2px'}; bottom: 2px; background-color: white; transition: 0.3s; border-radius: 50%; pointer-events: none;"></span>
+                </label>
+                <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(displayName)}</span>
+              </div>`;
+            }).join('') || `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无条目</div>`}
+          </div>
+          <div style="padding: 6px; border-top: 1px solid ${themeColors.border}; flex-shrink: 0;">
+            <input type="text" id="wb-mobile-search-entries" placeholder="搜索条目..." style="
+              width: 100%; padding: 6px 10px; border: 1px solid ${themeColors.border}; border-radius: 4px;
+              background: ${themeColors.inputBg}; color: ${themeColors.inputText}; font-size: 0.8em; box-sizing: border-box;
+            ">
+          </div>
+        </div>
+
+        <!-- 面板2: 常用条目 -->
+        <div id="wb-mobile-panel-2" style="display: none; flex-direction: column; flex: 1; overflow: hidden;">
+          <div id="wb-mobile-frequent-list" style="flex: 1; overflow-y: auto; padding: 6px;">
+            ${entriesWithState.map(entry => `<div class="wb-mobile-frequent" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" style="
+              display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; font-size: 0.8em;
+              ${!entry.enabled ? 'opacity: 0.5;' : ''} transition: background 0.15s;
+            " onmouseover="this.style.background='rgba(245,158,11,0.15)'" onmouseout="this.style.background='transparent'">
+              <label style="position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0; cursor: pointer;">
+                <input type="checkbox" class="wb-mobile-frequent-toggle" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" ${entry.enabled ? 'checked' : ''} style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
+                <span style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: ${entry.enabled ? '#10B981' : '#6B7280'}; transition: 0.3s; border-radius: 18px; pointer-events: none;"></span>
+                <span style="position: absolute; height: 14px; width: 14px; left: ${entry.enabled ? '16px' : '2px'}; bottom: 2px; background-color: white; transition: 0.3s; border-radius: 50%; pointer-events: none;"></span>
+              </label>
+              <div style="flex: 1; overflow: hidden; min-width: 0;">
+                <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  ${entry.pinned ? '<i class="fa-solid fa-thumbtack" style="color: #F59E0B; margin-right: 4px; font-size: 0.8em;"></i>' : ''}${escapeHtml(entry.name || '(无标题)')}
+                </div>
+                <div style="font-size: 0.75em; color: ${themeColors.secondaryText}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                  ${escapeHtml(entry.worldbook)}
+                </div>
+              </div>
+              <div style="display: flex; gap: 4px; flex-shrink: 0;">
+                <button class="wb-mobile-frequent-pin" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" data-pinned="${entry.pinned}" title="${entry.pinned ? '取消置顶' : '置顶'}" style="
+                  background: ${entry.pinned ? 'linear-gradient(135deg, #F59E0B 0%, #D97706 100%)' : 'transparent'};
+                  color: ${entry.pinned ? 'white' : themeColors.secondaryText};
+                  border: ${entry.pinned ? 'none' : '1px solid ' + themeColors.border};
+                  border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 0.7em;
+                "><i class="fa-solid fa-thumbtack"></i></button>
+                <button class="wb-mobile-frequent-remove" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" title="从历史移除" style="
+                  background: transparent; color: ${themeColors.secondaryText};
+                  border: 1px solid ${themeColors.border}; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 0.7em;
+                "><i class="fa-solid fa-trash"></i></button>
+              </div>
+            </div>`).join('') || `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无使用记录</div>`}
+          </div>
+          <div style="padding: 6px; border-top: 1px solid ${themeColors.border}; flex-shrink: 0;">
+            <input type="text" id="wb-mobile-search-frequent" placeholder="搜索常用条目..." style="
+              width: 100%; padding: 6px 10px; border: 1px solid ${themeColors.border}; border-radius: 4px;
+              background: ${themeColors.inputBg}; color: ${themeColors.inputText}; font-size: 0.8em; box-sizing: border-box;
+            ">
+          </div>
+        </div>
+      </div>
+    `;
+
+    $('body', parentDoc).append(menuHtml);
+
+    // 根据初始标签页设置显示状态
+    if (initialTab !== 1) {
+      const themeColors = getThemeColors();
+      // 更新标签样式
+      $('.wb-mobile-tab', parentDoc).each(function() {
+        const tabNum = parseInt($(this).data('tab'));
+        if (tabNum === initialTab) {
+          $(this).css({
+            'background': 'linear-gradient(135deg, #8B5CF6 0%, #7C3AED 100%)',
+            'color': 'white',
+            'border': '1px solid transparent'
+          });
+        } else {
+          $(this).css({
+            'background': 'transparent',
+            'color': themeColors.text,
+            'border': `1px solid ${themeColors.border}`
+          });
+        }
+      });
+      // 切换面板显示
+      $('#wb-mobile-panel-0, #wb-mobile-panel-1, #wb-mobile-panel-2', parentDoc).hide();
+      $(`#wb-mobile-panel-${initialTab}`, parentDoc).css('display', 'flex');
+    }
+
+    // 标签切换 - 使用显示/隐藏方式而不是滑动
+    $('#worldbook-switcher-mobile-menu .wb-mobile-tab', parentDoc).on('click', function() {
+      const tab = parseInt($(this).data('tab'));
+      const themeColors = getThemeColors();
+      
+      // 更新标签样式
+      $('.wb-mobile-tab', parentDoc).each(function() {
+        $(this).css({
+          'background': 'transparent',
+          'color': themeColors.text,
+          'border': `1px solid ${themeColors.border}`
+        });
+      });
+      $(this).css({
+        'background': 'linear-gradient(135deg, #8B5CF6 0%, #7C3AED 100%)',
+        'color': 'white',
+        'border': '1px solid transparent'
+      });
+      
+      // 切换面板显示
+      $('#wb-mobile-panel-0, #wb-mobile-panel-1, #wb-mobile-panel-2', parentDoc).hide();
+      $(`#wb-mobile-panel-${tab}`, parentDoc).css('display', 'flex');
+    });
+
+    // 关闭按钮
+    $('#wb-mobile-close', parentDoc).on('click', function() {
+      $('#worldbook-switcher-mobile-menu', parentDoc).remove();
+      $(parentDoc).off('.wbmobilemenu');
+    });
+
+    // 世界书开关
+    $('#worldbook-switcher-mobile-menu', parentDoc).on('click', '.wb-mobile-worldbook-toggle', async function(e) {
+      e.stopPropagation();
+      const wbName = $(this).data('name');
+      const enabled = $(this).is(':checked');
+      try {
+        const currentGlobalWbs = await getGlobalWorldbooks();
+        const newGlobalWbs = enabled ? [...currentGlobalWbs, wbName].filter((v, i, a) => a.indexOf(v) === i) : currentGlobalWbs.filter(wb => wb !== wbName);
+        if (typeof rebindGlobalWorldbooks === 'function') await rebindGlobalWorldbooks(newGlobalWbs);
+        
+        // 更新UI
+        const $item = $(this).closest('.wb-mobile-worldbook');
+        $item.css('opacity', enabled ? '1' : '0.5');
+        $(this).siblings('span').first().css('background-color', enabled ? '#3B82F6' : '#6B7280');
+        $(this).siblings('span').last().css('left', enabled ? '16px' : '2px');
+
+        // 轮询检测，等待API状态同步
+        let latestGlobalWbs = [];
+        for (let i = 0; i < 3; i++) {
+          await new Promise(resolve => scheduleWorldbookTimeout(resolve, 200));
+          latestGlobalWbs = await getGlobalWorldbooks();
+          const hasWorldbook = latestGlobalWbs.includes(wbName);
+          if ((enabled && hasWorldbook) || (!enabled && !hasWorldbook)) break;
+        }
+
+        // 更新条目面板的世界书选择器
+        const $selector = $('#wb-mobile-worldbook-selector', parentDoc);
+        if ($selector.length) {
+          const currentValue = $selector.val();
+          $selector.html(latestGlobalWbs.length === 0 ?
+            '<option value="">无已启用的世界书</option>' :
+            latestGlobalWbs.map(wb => `
+              <option value="${escapeHtml(wb)}" ${currentValue === wb ? 'selected' : ''}>
+                ${escapeHtml(wb)}
+              </option>
+            `).join('')
+          );
+          // 如果当前选中的世界书被禁用了，自动选择第一个
+          if (!latestGlobalWbs.includes(currentValue) && latestGlobalWbs.length > 0) {
+            $selector.val(latestGlobalWbs[0]);
+            $selector.trigger('change');
+          }
+        }
+      } catch (err) { console.error('[WorldbookSwitcher] 切换世界书失败:', err); }
+    });
+
+    // 世界书选择器变化
+    $('#wb-mobile-worldbook-selector', parentDoc).on('change', async function() {
+      const selectedWb = $(this).val();
+      if (selectedWb && selectedWb !== currentState.selectedWorldbook) {
+        currentState.selectedWorldbook = selectedWb;
+        const newEntries = await getWorldbookEntries(selectedWb);
+        currentState.entries = newEntries;
+        const themeColors = getThemeColors();
+        $('#wb-mobile-entries-list', parentDoc).html(newEntries.map(entry => {
+          const displayName = entry.name || truncateText(entry.content, 15) || '(无标题)';
+          return `<div class="wb-mobile-entry" data-uid="${entry.uid}" style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; font-size: 0.8em; ${!entry.enabled ? 'opacity: 0.5;' : ''} transition: background 0.15s;" onmouseover="this.style.background='rgba(139,92,246,0.15)'" onmouseout="this.style.background='transparent'">
+            <label style="position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0; cursor: pointer;"><input type="checkbox" class="wb-mobile-entry-toggle" data-uid="${entry.uid}" ${entry.enabled ? 'checked' : ''} style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;"><span style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: ${entry.enabled ? '#10B981' : '#6B7280'}; transition: 0.3s; border-radius: 18px; pointer-events: none;"></span><span style="position: absolute; height: 14px; width: 14px; left: ${entry.enabled ? '16px' : '2px'}; bottom: 2px; background-color: white; transition: 0.3s; border-radius: 50%; pointer-events: none;"></span></label>
+            <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(displayName)}</span>
+          </div>`;
+        }).join('') || `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无条目</div>`);
+      }
+    });
+
+    // 条目开关
+    $('#worldbook-switcher-mobile-menu', parentDoc).on('click', '.wb-mobile-entry-toggle', async function(e) {
+      e.stopPropagation();
+      const uid = parseInt($(this).data('uid'));
+      const enabled = $(this).is(':checked');
+      const entry = currentState.entries.find(e => e.uid === uid);
+      if (entry) {
+        entry.enabled = enabled;
+        await updateWorldbookEntries(currentState.selectedWorldbook, currentState.entries);
+        recordEntryUsage(currentState.selectedWorldbook, uid, entry.name || truncateText(entry.content, 15));
+        const $item = $(this).closest('.wb-mobile-entry');
+        $item.css('opacity', enabled ? '1' : '0.5');
+        $(this).siblings('span').first().css('background-color', enabled ? '#10B981' : '#6B7280');
+        $(this).siblings('span').last().css('left', enabled ? '16px' : '2px');
+      }
+    });
+
+    // 常用条目开关
+    $('#worldbook-switcher-mobile-menu', parentDoc).on('click', '.wb-mobile-frequent-toggle', async function(e) {
+      e.stopPropagation();
+      const worldbook = $(this).data('worldbook');
+      const uid = parseInt($(this).data('uid'));
+      const enabled = $(this).is(':checked');
+      try {
+        const entries = await getWorldbookEntries(worldbook);
+        const entry = entries.find(e => e.uid === uid);
+        if (entry) {
+          entry.enabled = enabled;
+          await updateWorldbookEntries(worldbook, entries);
+          recordEntryUsage(worldbook, uid, entry.name || truncateText(entry.content, 15));
+          const $item = $(this).closest('.wb-mobile-frequent');
+          $item.css('opacity', enabled ? '1' : '0.5');
+          $(this).siblings('span').first().css('background-color', enabled ? '#10B981' : '#6B7280');
+          $(this).siblings('span').last().css('left', enabled ? '16px' : '2px');
+        }
+      } catch (err) { console.error('[WorldbookSwitcher] 切换常用条目失败:', err); }
+    });
+
+    // 切换到完整模式按钮
+    $('#wb-mobile-switch-full', parentDoc).on('click', function(e) {
+      e.stopPropagation();
+      const config = getWorldbookSwitcherConfig();
+      config.simpleMode = false;
+      saveWorldbookSwitcherConfig(config);
+      currentState.isIntercepting = false;
+      $('#worldbook-switcher-mobile-menu', parentDoc).remove();
+      $(parentDoc).off('.wbmobilemenu');
+      const $wiIcon = $('#WIDrawerIcon', parentDoc);
+      if ($wiIcon.length) $wiIcon[0].click();
+    });
+
+    // 世界书置顶按钮
+    $('#worldbook-switcher-mobile-menu', parentDoc).on('click', '.wb-mobile-worldbook-pin', function(e) {
+      e.stopPropagation();
+      const $btn = $(this);
+      const wbName = $btn.data('name');
+      const isPinned = $btn.data('pinned') === true || $btn.data('pinned') === 'true';
+      const config = getWorldbookSwitcherConfig();
+      if (!config.pinnedWorldbooks) config.pinnedWorldbooks = [];
+      if (isPinned) {
+        config.pinnedWorldbooks = config.pinnedWorldbooks.filter(wb => wb !== wbName);
+      } else {
+        if (!config.pinnedWorldbooks.includes(wbName)) config.pinnedWorldbooks.push(wbName);
+      }
+      saveWorldbookSwitcherConfig(config);
+      // 刷新面板 - 保持在世界书面板(0)
+      $('#worldbook-switcher-mobile-menu', parentDoc).remove();
+      $(parentDoc).off('.wbmobilemenu');
+      showMobileMenu(0);
+    });
+
+    // 常用条目置顶按钮
+    $('#worldbook-switcher-mobile-menu', parentDoc).on('click', '.wb-mobile-frequent-pin', function(e) {
+      e.stopPropagation();
+      const $btn = $(this);
+      const worldbook = $btn.data('worldbook');
+      const uid = parseInt($btn.data('uid'));
+      const isPinned = $btn.data('pinned') === true || $btn.data('pinned') === 'true';
+      if (isPinned) {
+        unpinEntry(worldbook, uid);
+      } else {
+        pinEntry(worldbook, uid);
+      }
+      // 刷新面板 - 保持在常用面板(2)
+      $('#worldbook-switcher-mobile-menu', parentDoc).remove();
+      $(parentDoc).off('.wbmobilemenu');
+      showMobileMenu(2);
+    });
+
+    // 常用条目移除按钮
+    $('#worldbook-switcher-mobile-menu', parentDoc).on('click', '.wb-mobile-frequent-remove', function(e) {
+      e.stopPropagation();
+      const $btn = $(this);
+      const worldbook = $btn.data('worldbook');
+      const uid = parseInt($btn.data('uid'));
+      removeFromHistory(worldbook, uid);
+      $btn.closest('.wb-mobile-frequent').fadeOut(200, function() {
+        $(this).remove();
+        if ($('#wb-mobile-frequent-list .wb-mobile-frequent', parentDoc).length === 0) {
+          const themeColors = getThemeColors();
+          $('#wb-mobile-frequent-list', parentDoc).html(
+            `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无使用记录</div>`
+          );
+        }
+      });
+    });
+
+    // 搜索功能 - 世界书
+    $('#wb-mobile-search-worldbooks', parentDoc).on('input', function() {
+      const keyword = $(this).val().toLowerCase().trim();
+      $('#wb-mobile-worldbooks-list .wb-mobile-worldbook', parentDoc).each(function() {
+        const name = $(this).data('name').toLowerCase();
+        $(this).toggle(name.includes(keyword));
+      });
+    });
+
+    // 搜索功能 - 条目
+    $('#wb-mobile-search-entries', parentDoc).on('input', function() {
+      const keyword = $(this).val().toLowerCase().trim();
+      $('#wb-mobile-entries-list .wb-mobile-entry', parentDoc).each(function() {
+        const name = $(this).find('span').last().text().toLowerCase();
+        $(this).toggle(name.includes(keyword));
+      });
+    });
+
+    // 搜索功能 - 常用条目
+    $('#wb-mobile-search-frequent', parentDoc).on('input', function() {
+      const keyword = $(this).val().toLowerCase().trim();
+      $('#wb-mobile-frequent-list .wb-mobile-frequent', parentDoc).each(function() {
+        const name = $(this).find('div > div').first().text().toLowerCase();
+        const worldbook = $(this).data('worldbook').toLowerCase();
+        $(this).toggle(name.includes(keyword) || worldbook.includes(keyword));
+      });
+    });
+
+    // 点击外部关闭
+    scheduleWorldbookTimeout(() => {
+      $(parentDoc).on('click.wbmobilemenu', function(e) {
+        if (!$(e.target).closest('#worldbook-switcher-mobile-menu, #WIDrawerIcon').length) {
+          $('#worldbook-switcher-mobile-menu', parentDoc).remove();
+          $(parentDoc).off('.wbmobilemenu');
+        }
+      });
+    }, 100);
+  }
+
+  // =============================================================================
+  // 在原生世界信息面板标题栏注入切换按钮
+  // =============================================================================
+  function injectSwitchButtonToNativePanel() {
+    // 检查按钮是否已存在
+    if ($('#wb-native-switch-btn', parentDoc).length) {
+      return;
+    }
+
+    // 查找原生面板的标题栏
+    const $headerContainer = $('#WorldInfo .flex-container.alignitemscenter.gap10px', parentDoc).first();
+    if (!$headerContainer.length) {
+      console.log('[WorldbookSwitcher] 未找到原生面板标题栏');
+      return;
+    }
+
+    // 创建切换按钮
+    const switchBtnHtml = `
+      <button id="wb-native-switch-btn" title="切换到简易模式" style="
+        background: linear-gradient(135deg, #8B5CF6 0%, #7C3AED 100%);
+        color: white;
+        border: none;
+        border-radius: 4px;
+        padding: 4px 10px;
+        cursor: pointer;
+        font-size: 0.8em;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin-left: auto;
+      ">
+        <i class="fa-solid fa-compress"></i> 简易
+      </button>
+    `;
+
+    // 添加到标题栏右侧
+    $headerContainer.append(switchBtnHtml);
+
+    // 绑定点击事件
+    $('#wb-native-switch-btn', parentDoc).on('click', function(e) {
+      e.stopPropagation();
+
+      // 更新配置为简易模式
+      const config = getWorldbookSwitcherConfig();
+      config.simpleMode = true;
+      saveWorldbookSwitcherConfig(config);
+
+      // 更新拦截状态
+      currentState.isIntercepting = true;
+
+      // 先关闭原生面板（直接移除openDrawer类）
+      const $worldInfo = $('#WorldInfo', parentDoc);
+      $worldInfo.removeClass('openDrawer');
+
+      // 然后打开简易菜单
+      showSimpleMenu();
+
+    });
+
+    console.log('[WorldbookSwitcher] 已在原生面板标题栏注入切换按钮');
+  }
+
+  // =============================================================================
+  // 监听原生世界信息图标点击
+  // =============================================================================
+  function setupNativeIconInterception() {
+    if (worldbookDestroyed) return;
+
+    const wiIcon = parentDoc.getElementById('WIDrawerIcon');
+    if (!wiIcon) {
+      console.log('[WorldbookSwitcher] 未找到原生世界信息图标，稍后重试...');
+      worldbookSetupRetryTimer = scheduleWorldbookTimeout(() => {
+        worldbookSetupRetryTimer = null;
+        setupNativeIconInterception();
+      }, 1000);
+      return;
+    }
+
+    const config = getWorldbookSwitcherConfig();
+    currentState.isIntercepting = config.simpleMode;
+
+    console.log('[WorldbookSwitcher] 找到原生世界信息图标，设置拦截监听，当前模式:', config.simpleMode ? '简易' : '完整');
+
+    if (worldbookNativeIcon && worldbookNativeIconClickHandler) {
+      worldbookNativeIcon.removeEventListener('click', worldbookNativeIconClickHandler, true);
+    }
+
+    worldbookNativeIcon = wiIcon;
+    worldbookNativeIconClickHandler = function(e) {
+      if (currentState.isIntercepting) {
+        console.log('[WorldbookSwitcher] 拦截原生图标点击，显示简易菜单');
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        showSimpleMenu();
+        return false;
+      }
+      console.log('[WorldbookSwitcher] 不拦截，允许原生事件');
+      return true;
+    };
+    worldbookNativeIcon.addEventListener('click', worldbookNativeIconClickHandler, true);
+
+    if (worldbookPanelObserver) {
+      worldbookPanelObserver.disconnect();
+      worldbookPanelObserver = null;
+    }
+
+    const worldInfoPanel = parentDoc.getElementById('WorldInfo');
+    if (worldInfoPanel) {
+      worldbookPanelObserver = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+          if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+            const $worldInfo = $('#WorldInfo', parentDoc);
+            if ($worldInfo.hasClass('openDrawer')) {
+              scheduleWorldbookTimeout(injectSwitchButtonToNativePanel, 100);
+            }
+          }
+        });
+      });
+
+      worldbookPanelObserver.observe(worldInfoPanel, { attributes: true });
+      console.log('[WorldbookSwitcher] 已设置原生面板监听');
+    }
+  }
+
+  // =============================================================================
+  // 初始化
+  // =============================================================================
+  function init() {
+    if (worldbookInitialized) return;
+    if (!parentDoc || typeof parentDoc.getElementById !== 'function') {
+      console.warn('[WorldbookSwitcher] parentDoc 不可用，初始化取消');
+      return;
+    }
+    if (typeof $ !== 'function') {
+      console.warn('[WorldbookSwitcher] jQuery 不可用，初始化取消');
+      return;
+    }
+
+    worldbookDestroyed = false;
+    worldbookInitialized = true;
+    migrateLegacyWorldbookConfigIfNeeded();
+
+    console.log('[WorldbookSwitcher] 初始化...');
+    setupNativeIconInterception();
+
+    window.WorldbookSwitcher = {
+      openSimpleMenu: showSimpleMenu,
+      setIntercepting: (value) => {
+        currentState.isIntercepting = Boolean(value);
+        const config = getWorldbookSwitcherConfig();
+        config.simpleMode = Boolean(value);
+        saveWorldbookSwitcherConfig(config);
+      },
+      isIntercepting: () => currentState.isIntercepting,
+    };
+
+    console.log('[WorldbookSwitcher] 插件已初始化 v2.0');
+  }
+
+  function destroy() {
+    worldbookDestroyed = true;
+
+    clearWorldbookTimeouts();
+    if (worldbookSetupRetryTimer) {
+      clearTimeout(worldbookSetupRetryTimer);
+      worldbookSetupRetryTimer = null;
+    }
+
+    if (worldbookPanelObserver) {
+      worldbookPanelObserver.disconnect();
+      worldbookPanelObserver = null;
+    }
+
+    if (worldbookNativeIcon && worldbookNativeIconClickHandler) {
+      worldbookNativeIcon.removeEventListener('click', worldbookNativeIconClickHandler, true);
+    }
+    worldbookNativeIcon = null;
+    worldbookNativeIconClickHandler = null;
+
+    if (typeof $ === 'function') {
+      $(parentDoc).off('.wbmenu');
+      $(parentDoc).off('.wbmobilemenu');
+      $('#worldbook-switcher-menu', parentDoc).remove();
+      $('#worldbook-switcher-mobile-menu', parentDoc).remove();
+      $('#wb-native-switch-btn', parentDoc).off('click').remove();
+    }
+
+    if (window.WorldbookSwitcher) {
+      delete window.WorldbookSwitcher;
+    }
+
+    worldbookInitialized = false;
+  }
+
+  return { init, destroy };
+  })();
+
+  function initWorldbookSwitcher() {
+    worldbookSwitcherModule.init();
+  }
+
+  function destroyWorldbookSwitcher() {
+    worldbookSwitcherModule.destroy();
+  }
+
   function bindTavernEvents() {
     if (typeof tavern_events === 'undefined') {
       warn('tavern_events 不可用，无法完成初始化');
@@ -3158,19 +6256,27 @@
     bindEvent(tavern_events.CHAT_COMPLETION_SETTINGS_READY, onChatCompletionSettingsReady);
     bindEvent(tavern_events.GENERATION_STOPPED, onGenerationStopped);
     bindEvent(tavern_events.GENERATION_ENDED, onGenerationEnded);
-    debug('事件绑定完成', {
-      events: [
-        'APP_READY',
-        'CHATCOMPLETION_SOURCE_CHANGED',
-        'OAI_PRESET_CHANGED_AFTER',
-        'GENERATION_STARTED',
-        'MESSAGE_SENT',
-        'MESSAGE_RECEIVED',
-        'CHAT_COMPLETION_SETTINGS_READY',
-        'GENERATION_STOPPED',
-        'GENERATION_ENDED',
-      ],
-    });
+
+    if (config.old_floor_swipe_enabled) {
+      bindOldFloorSwipeEvents();
+    }
+    const boundEvents = [
+      'APP_READY',
+      'CHATCOMPLETION_SOURCE_CHANGED',
+      'OAI_PRESET_CHANGED_AFTER',
+      'GENERATION_STARTED',
+      'MESSAGE_SENT',
+      'MESSAGE_RECEIVED',
+      'CHAT_COMPLETION_SETTINGS_READY',
+      'GENERATION_STOPPED',
+      'GENERATION_ENDED',
+    ];
+
+    if (config.old_floor_swipe_enabled && typeof iframe_events !== 'undefined' && iframe_events.STREAM_TOKEN_RECEIVED_FULLY) {
+      boundEvents.push('STREAM_TOKEN_RECEIVED_FULLY');
+    }
+
+    debug('事件绑定完成', { events: boundEvents });
   }
 
   function startMutationObserver() {
@@ -3183,6 +6289,9 @@
     mutationObserver = new Observer(() => {
       scheduleUiPatch();
       scheduleDomRebind();
+      if (config.old_floor_swipe_enabled) {
+        scheduleOldFloorSwipeScan();
+      }
     });
 
     mutationObserver.observe(hostDocument.body, {
@@ -3217,6 +6326,10 @@
       retry_count: getConfiguredRetryCount(),
       retry_delay_ms: getConfiguredRetryDelayMs(),
       min_reply_tokens: getConfiguredMinReplyTokens(),
+      parallel_temperatures: getConfiguredParallelTemperatures(),
+      status_bar_simple_mode: Boolean(config.status_bar_simple_mode),
+      old_floor_swipe_enabled: Boolean(config.old_floor_swipe_enabled),
+      worldbook_switcher_enabled: Boolean(config.worldbook_switcher_enabled),
       current_source: source,
       current_n: n,
       group_chat: isGroupChat(),
@@ -3264,20 +6377,40 @@
   }
 
   function exposeDebugApi() {
-    window.GeminiParallelSwipe = {
+    const api = {
       status,
       enable,
       disable,
       forcePatchUi,
+      openSettings: () => openSettingsPopup(),
     };
+    const hostWindow = getHostWindow();
+    if (hostWindow && typeof hostWindow === 'object') {
+      hostWindow.GeminiParallelSwipe = api;
+    }
+    window.GeminiParallelSwipe = api;
+    if (typeof globalThis === 'object' && globalThis) {
+      globalThis.GeminiParallelSwipe = api;
+    }
+  }
+
+  function runSafe(label, fn) {
+    try {
+      return fn();
+    } catch (error) {
+      warn(`${label} 失败:`, error);
+      return undefined;
+    }
   }
 
   function destroy() {
-    abortActiveJob('脚本实例销毁');
-    abortForegroundValidation('脚本实例销毁');
-    clearNormalParallelToken('script_destroy');
+    runSafe('中止并发任务', () => abortActiveJob('脚本实例销毁'));
+    runSafe('中止前台校验', () => abortForegroundValidation('脚本实例销毁'));
     activeForegroundSession = null;
-    removeAllParallelStatusBars();
+    runSafe('移除状态栏', () => removeAllParallelStatusBars());
+
+    runSafe('清理旧楼层 Swipe', () => destroyOldFloorSwipe());
+    runSafe('清理 worldbook switcher', () => destroyWorldbookSwitcher());
 
     while (eventStops.length > 0) {
       const stop = eventStops.pop();
@@ -3304,20 +6437,40 @@
       mutationObserver = null;
     }
 
+    const hostWindow = getHostWindow();
+    if (hostWindow && hostWindow.GeminiParallelSwipe) {
+      delete hostWindow.GeminiParallelSwipe;
+    }
     if (window.GeminiParallelSwipe) {
       delete window.GeminiParallelSwipe;
     }
+    if (typeof globalThis === 'object' && globalThis.GeminiParallelSwipe) {
+      delete globalThis.GeminiParallelSwipe;
+    }
 
-    removeStatusBarStyle();
+    runSafe('移除状态栏样式', () => removeStatusBarStyle());
   }
 
   function init() {
-    scheduleDomRebind();
-    bindTavernEvents();
-    startMutationObserver();
-    scheduleUiPatch();
-    refreshStatusBarForRetryState();
+    // 先暴露 API，避免任何后续模块异常导致调试入口缺失
     exposeDebugApi();
+
+    if (config.old_floor_swipe_enabled) {
+      runSafe('初始化旧楼层 Swipe', () => initOldFloorSwipe());
+    }
+    if (config.worldbook_switcher_enabled) {
+      runSafe('初始化 worldbook switcher', () => initWorldbookSwitcher());
+    }
+
+    runSafe('绑定 DOM 事件', () => scheduleDomRebind());
+    runSafe('绑定酒馆事件', () => bindTavernEvents());
+    runSafe('启动 MutationObserver', () => startMutationObserver());
+    runSafe('调度 UI 补丁', () => scheduleUiPatch());
+
+    if (config.old_floor_swipe_enabled) {
+      runSafe('调度旧楼层扫描', () => scheduleOldFloorSwipeScan());
+    }
+    runSafe('刷新状态栏', () => refreshStatusBarForRetryState());
     debug('调试日志开关状态', { enabled: isDebugEnabled(), flagKey: DEBUG_FLAG_KEY });
     log('初始化完成', status());
   }

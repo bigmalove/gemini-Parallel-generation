@@ -1,7 +1,7 @@
 {
   "id": "gemini-parallel-swipe-001",
-  "name": "Gemini并发生成（严格隔离版）",
+  "name": "Gemini并发生成",
   "content": "import 'https://gcore.jsdelivr.net/gh/bigmalove/gemini-Parallel-generation@v1.0/extracted-gemini-parallel.js'",
-  "info": "并发补全（严格隔离）：支持 makersuite / vertexai / openai / custom / openrouter / azure_openai。\n普通发送仅在本脚本接管链路触发并发；再生/继续仅在请求显式 n>1 时并发。\n已移除全局 fetch 重试补丁对其他脚本的影响（如 DeepThink、数据库脚本）。\n\n版本: v1.0",
+  "info": "并发补全：支持 makersuite / vertexai / openai / custom / openrouter / azure_openai。\n触发条件为请求目标 n>1（并满足支持源与生成类型 normal/regenerate/continue）。\nopenai/custom/openrouter/azure_openai 采用前台 n=1 + 脚本并发补齐。\n\n版本: v1.0",
   "buttons": []
 }
