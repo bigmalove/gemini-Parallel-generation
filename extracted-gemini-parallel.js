@@ -23,6 +23,8 @@
   const STATUS_BAR_DRAGGING_CLASS = 'is-dragging';
   const STATUS_BAR_COLLAPSED_CLASS = 'is-collapsed';
   const STATUS_BAR_SIMPLE_MODE_CLASS = 'is-simple-mode';
+  const STATUS_BAR_NAV_UP_BUTTON_CLASS = 'gemini-parallel-status-nav-up-btn';
+  const STATUS_BAR_NAV_DOWN_BUTTON_CLASS = 'gemini-parallel-status-nav-down-btn';
   const SETTINGS_PANEL_CLASS = 'gemini-parallel-settings-panel';
   const SETTINGS_ROW_CLASS = 'gemini-parallel-settings-row';
   const SETTINGS_STEPPER_CLASS = 'gemini-parallel-settings-stepper';
@@ -98,6 +100,10 @@
   let statusBarDragState = null;
   let lastStatusBarToggleAt = 0;
   let statusBarIgnoreToggleUntil = 0;
+  let lastNavActionAt = 0;
+  let lastNavActionKey = '';
+  let navCursorMessageId = null;
+  let navCursorUpdatedAt = 0;
   let retryStatusSeq = 0;
   let retryStatusKeySeq = 0;
   let activeForegroundSession = null;
@@ -257,11 +263,11 @@
       }
 
       .${STATUS_BAR_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} {
-        min-width: 30px;
-        max-width: 30px;
-        width: 30px;
-        padding: 3px;
-        gap: 0;
+        min-width: max-content;
+        max-width: calc(100% - 20px);
+        width: auto;
+        padding: 3px 6px;
+        gap: 4px;
         justify-content: center;
       }
 
@@ -272,7 +278,7 @@
       }
 
       .${STATUS_BAR_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} .${STATUS_BAR_TOGGLE_BUTTON_CLASS} {
-        pointer-events: none;
+        pointer-events: auto;
       }
 
       .${STATUS_BAR_TOGGLE_BUTTON_CLASS} {
@@ -381,6 +387,37 @@
 
       .${STATUS_BAR_SETTINGS_BUTTON_CLASS}:hover {
         background: rgba(255, 255, 255, 0.16);
+      }
+
+      .${STATUS_BAR_NAV_UP_BUTTON_CLASS},
+      .${STATUS_BAR_NAV_DOWN_BUTTON_CLASS} {
+        flex: 0 0 auto;
+        width: 22px;
+        min-width: 22px;
+        height: 22px;
+        border: 1px solid rgba(255, 255, 255, 0.28);
+        background: rgba(255, 255, 255, 0.08);
+        color: #f5f7fa;
+        font-size: 10px;
+        font-weight: 700;
+        border-radius: 999px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        line-height: 1;
+        cursor: pointer;
+        pointer-events: auto;
+        touch-action: manipulation;
+      }
+
+      .${STATUS_BAR_NAV_UP_BUTTON_CLASS}:hover,
+      .${STATUS_BAR_NAV_DOWN_BUTTON_CLASS}:hover {
+        background: rgba(255, 255, 255, 0.16);
+      }
+
+      .${STATUS_BAR_NAV_UP_BUTTON_CLASS}:active,
+      .${STATUS_BAR_NAV_DOWN_BUTTON_CLASS}:active {
+        background: rgba(255, 255, 255, 0.24);
       }
 
       .${SETTINGS_PANEL_CLASS} {
@@ -984,11 +1021,11 @@
     bar.classList.toggle(STATUS_BAR_COLLAPSED_CLASS, collapsed);
 
     if (collapsed) {
-      bar.style.minWidth = '30px';
-      bar.style.maxWidth = '30px';
-      bar.style.width = '30px';
-      bar.style.padding = '3px';
-      bar.style.gap = '0';
+      bar.style.minWidth = 'max-content';
+      bar.style.maxWidth = 'calc(100% - 20px)';
+      bar.style.width = 'auto';
+      bar.style.padding = '3px 6px';
+      bar.style.gap = '4px';
       bar.style.justifyContent = 'center';
       if (isDomElement(textNode)) textNode.style.display = 'none';
       if (isDomElement(dotsNode)) dotsNode.style.display = 'none';
@@ -1089,8 +1126,212 @@
       if (node.tagName === 'BUTTON') return true;
       if (node.classList?.contains(STATUS_BAR_SETTINGS_BUTTON_CLASS)) return true;
       if (node.classList?.contains(STATUS_BAR_TOGGLE_BUTTON_CLASS)) return true;
+      if (node.classList?.contains(STATUS_BAR_NAV_UP_BUTTON_CLASS)) return true;
+      if (node.classList?.contains(STATUS_BAR_NAV_DOWN_BUTTON_CLASS)) return true;
     }
     return false;
+  }
+
+  function getNavigableMessageItems() {
+    const hostDocument = getHostDocument();
+    if (!hostDocument) return [];
+    const chatContainer = hostDocument.querySelector('#chat');
+    if (!chatContainer) return [];
+
+    const nodes = Array.from(chatContainer.querySelectorAll('.mes[mesid]'));
+    if (!nodes.length) return [];
+
+    const itemMap = new Map();
+    for (const node of nodes) {
+      const rawMesId = node.getAttribute('mesid');
+      const numericMesId = Number(rawMesId);
+      if (!Number.isFinite(numericMesId)) continue;
+      const messageId = Math.floor(numericMesId);
+      if (messageId < 0) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.height <= 0 && rect.width <= 0) continue;
+      if (!itemMap.has(messageId)) {
+        itemMap.set(messageId, { el: node, id: messageId });
+      }
+    }
+
+    return Array.from(itemMap.values()).sort((a, b) => a.id - b.id);
+  }
+
+  function getCurrentVisibleMessageIndex(items) {
+    if (!Array.isArray(items) || items.length === 0) return -1;
+    const hostDocument = getHostDocument();
+    const chatContainer = hostDocument?.querySelector('#chat');
+    if (!chatContainer) return -1;
+
+    const containerRect = chatContainer.getBoundingClientRect();
+    const viewportMid = containerRect.top + containerRect.height / 2;
+    let closestIndex = -1;
+    let closestDistance = Infinity;
+    for (let i = 0; i < items.length; i++) {
+      const mesRect = items[i].el.getBoundingClientRect();
+      const mesMid = mesRect.top + mesRect.height / 2;
+      const distance = Math.abs(mesMid - viewportMid);
+      if (distance < closestDistance) {
+        closestDistance = distance;
+        closestIndex = i;
+      }
+    }
+    return closestIndex;
+  }
+
+  function resolveCurrentNavigableIndex(items, visibleIndex) {
+    const cursorIndex = findMessageIndexById(items, navCursorMessageId);
+    const useRecentCursor = cursorIndex >= 0 && (Date.now() - navCursorUpdatedAt <= 4000);
+    if (useRecentCursor) {
+      return cursorIndex;
+    }
+    if (visibleIndex >= 0) {
+      return visibleIndex;
+    }
+    return cursorIndex;
+  }
+
+  function isSuccessfulSlashResult(result) {
+    if (result == null) return false;
+    if (typeof result !== 'object') return true;
+    if (result.isError) return false;
+    if (result.isAborted) return false;
+    return true;
+  }
+
+  function findMessageIndexById(items, messageId) {
+    if (!Array.isArray(items) || items.length === 0) return -1;
+    if (!Number.isFinite(Number(messageId))) return -1;
+    const wantedId = Math.floor(Number(messageId));
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].id === wantedId) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  async function jumpToFloor(targetId) {
+    const command = `/chat-jump ${targetId}`;
+
+    if (typeof triggerSlash === 'function') {
+      try {
+        await triggerSlash(command);
+        return true;
+      } catch (error) {
+        warn('triggerSlash 跳转失败:', error);
+      }
+    }
+
+    try {
+      const hostWindow = getHostWindow();
+      const context = getContext();
+      const stContext = hostWindow?.SillyTavern?.getContext?.() || context;
+      if (stContext && typeof stContext.executeSlashCommandsWithOptions === 'function') {
+        const result = await stContext.executeSlashCommandsWithOptions(command);
+        return isSuccessfulSlashResult(result);
+      }
+    } catch (error) {
+      warn('executeSlashCommandsWithOptions 跳转失败:', error);
+    }
+
+    return false;
+  }
+
+  async function navigateFloor(direction) {
+    const items = getNavigableMessageItems();
+    if (!items.length) return;
+
+    const visibleIndex = getCurrentVisibleMessageIndex(items);
+    const currentIndex = resolveCurrentNavigableIndex(items, visibleIndex);
+    if (currentIndex < 0) return;
+
+    let targetIndex;
+    if (direction === 'up') {
+      targetIndex = currentIndex <= 0 ? 0 : currentIndex - 1;
+    } else {
+      targetIndex = currentIndex >= items.length - 1 ? items.length - 1 : currentIndex + 1;
+    }
+
+    if (targetIndex === currentIndex) return;
+
+    const target = items[targetIndex];
+    if (!target) return;
+    navCursorMessageId = target.id;
+    navCursorUpdatedAt = Date.now();
+
+    let jumped = false;
+    try {
+      jumped = await jumpToFloor(target.id);
+    } catch (err) {
+      warn('楼层导航失败:', err);
+    }
+
+    if (!jumped && target.el && typeof target.el.scrollIntoView === 'function') {
+      target.el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
+
+  function shouldSkipDuplicateNavAction(direction, eventType) {
+    const now = Date.now();
+    const key = `${direction}:${eventType}`;
+    if (
+      eventType === 'click'
+      && now - lastNavActionAt < 320
+      && (
+        lastNavActionKey === `${direction}:pointerup`
+        || lastNavActionKey === `${direction}:touchend`
+      )
+    ) {
+      return true;
+    }
+    if (key === lastNavActionKey && now - lastNavActionAt < 120) {
+      return true;
+    }
+    lastNavActionAt = now;
+    lastNavActionKey = key;
+    return false;
+  }
+
+  function onNavUpButtonClick(event) {
+    const eventType = event?.type || 'click';
+    if (shouldSkipDuplicateNavAction('up', eventType)) return;
+    event.stopPropagation();
+    event.preventDefault();
+    void navigateFloor('up');
+  }
+
+  function onNavUpButtonPointerUp(event) {
+    onNavUpButtonClick(event);
+  }
+
+  function onNavUpButtonTouchEnd(event) {
+    onNavUpButtonClick(event);
+  }
+
+  function onNavDownButtonClick(event) {
+    const eventType = event?.type || 'click';
+    if (shouldSkipDuplicateNavAction('down', eventType)) return;
+    event.stopPropagation();
+    event.preventDefault();
+    void navigateFloor('down');
+  }
+
+  function onNavDownButtonPointerUp(event) {
+    onNavDownButtonClick(event);
+  }
+
+  function onNavDownButtonTouchEnd(event) {
+    onNavDownButtonClick(event);
+  }
+
+  function onNavButtonPointerDown(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (typeof event.stopImmediatePropagation === 'function') {
+      event.stopImmediatePropagation();
+    }
   }
 
   function unbindStatusBarDragDocEvents(doc) {
@@ -1343,7 +1584,43 @@
     settingsButton.removeEventListener('click', onStatusBarSettingsButtonClick);
     settingsButton.addEventListener('click', onStatusBarSettingsButtonClick);
 
-    bar.replaceChildren(toggleButton, dotsNode, textNode, settingsButton);
+    let navUpButton = bar.querySelector(`.${STATUS_BAR_NAV_UP_BUTTON_CLASS}`);
+    if (!navUpButton) {
+      navUpButton = hostDocument.createElement('button');
+    }
+    navUpButton.type = 'button';
+    navUpButton.className = STATUS_BAR_NAV_UP_BUTTON_CLASS;
+    navUpButton.textContent = '▲';
+    navUpButton.title = '上一楼层';
+    navUpButton.setAttribute('aria-label', '上一楼层');
+    navUpButton.removeEventListener('pointerdown', onNavButtonPointerDown);
+    navUpButton.addEventListener('pointerdown', onNavButtonPointerDown);
+    navUpButton.removeEventListener('click', onNavUpButtonClick);
+    navUpButton.addEventListener('click', onNavUpButtonClick);
+    navUpButton.removeEventListener('pointerup', onNavUpButtonPointerUp);
+    navUpButton.addEventListener('pointerup', onNavUpButtonPointerUp);
+    navUpButton.removeEventListener('touchend', onNavUpButtonTouchEnd);
+    navUpButton.addEventListener('touchend', onNavUpButtonTouchEnd, { passive: false });
+
+    let navDownButton = bar.querySelector(`.${STATUS_BAR_NAV_DOWN_BUTTON_CLASS}`);
+    if (!navDownButton) {
+      navDownButton = hostDocument.createElement('button');
+    }
+    navDownButton.type = 'button';
+    navDownButton.className = STATUS_BAR_NAV_DOWN_BUTTON_CLASS;
+    navDownButton.textContent = '▼';
+    navDownButton.title = '下一楼层';
+    navDownButton.setAttribute('aria-label', '下一楼层');
+    navDownButton.removeEventListener('pointerdown', onNavButtonPointerDown);
+    navDownButton.addEventListener('pointerdown', onNavButtonPointerDown);
+    navDownButton.removeEventListener('click', onNavDownButtonClick);
+    navDownButton.addEventListener('click', onNavDownButtonClick);
+    navDownButton.removeEventListener('pointerup', onNavDownButtonPointerUp);
+    navDownButton.addEventListener('pointerup', onNavDownButtonPointerUp);
+    navDownButton.removeEventListener('touchend', onNavDownButtonTouchEnd);
+    navDownButton.addEventListener('touchend', onNavDownButtonTouchEnd, { passive: false });
+
+    bar.replaceChildren(toggleButton, dotsNode, textNode, navUpButton, navDownButton, settingsButton);
 
     if (bar.parentElement !== body) {
       body.appendChild(bar);
