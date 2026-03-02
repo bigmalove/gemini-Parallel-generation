@@ -22,9 +22,11 @@
   const STATUS_BAR_SETTINGS_BUTTON_CLASS = 'gemini-parallel-status-settings-btn';
   const STATUS_BAR_DRAGGING_CLASS = 'is-dragging';
   const STATUS_BAR_COLLAPSED_CLASS = 'is-collapsed';
+  const STATUS_BAR_WORKING_CLASS = 'is-working';
   const STATUS_BAR_SIMPLE_MODE_CLASS = 'is-simple-mode';
   const STATUS_BAR_NAV_UP_BUTTON_CLASS = 'gemini-parallel-status-nav-up-btn';
   const STATUS_BAR_NAV_DOWN_BUTTON_CLASS = 'gemini-parallel-status-nav-down-btn';
+  const STATUS_BAR_NAV_PRESSING_CLASS = 'is-pressing';
   const SETTINGS_PANEL_CLASS = 'gemini-parallel-settings-panel';
   const SETTINGS_ROW_CLASS = 'gemini-parallel-settings-row';
   const SETTINGS_STEPPER_CLASS = 'gemini-parallel-settings-stepper';
@@ -112,6 +114,7 @@
   const domCleanups = [];
   const fetchPatchCleanups = [];
   const retryStatusEntries = new Map();
+  const navPressFeedbackTimers = new WeakMap();
 
   function log(...args) {
     console.log(TAG, ...args);
@@ -281,6 +284,50 @@
         pointer-events: auto;
       }
 
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_WORKING_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} .${STATUS_BAR_TOGGLE_BUTTON_CLASS} {
+        border-color: rgba(125, 211, 252, 0.78);
+        background: rgba(56, 189, 248, 0.2);
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_WORKING_CLASS}.${STATUS_BAR_COLLAPSED_CLASS}
+      .${STATUS_BAR_TOGGLE_BUTTON_CLASS} .gemini-parallel-status-spinner {
+        display: inline-block;
+        font-size: 13px;
+        line-height: 1;
+        color: rgba(201, 236, 255, 0.96);
+        transform-origin: 50% 50%;
+        will-change: transform;
+        animation: gemini-parallel-status-spinner-spin 2.4s linear infinite;
+      }
+
+      @keyframes gemini-parallel-status-spinner-spin {
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .${STATUS_BAR_CLASS}.${STATUS_BAR_WORKING_CLASS}.${STATUS_BAR_COLLAPSED_CLASS}
+        .${STATUS_BAR_TOGGLE_BUTTON_CLASS} .gemini-parallel-status-spinner {
+          animation: none;
+          transform: none;
+        }
+
+        .${STATUS_BAR_NAV_UP_BUTTON_CLASS},
+        .${STATUS_BAR_NAV_DOWN_BUTTON_CLASS} {
+          transition: none;
+        }
+
+        .${STATUS_BAR_NAV_UP_BUTTON_CLASS}.${STATUS_BAR_NAV_PRESSING_CLASS},
+        .${STATUS_BAR_NAV_DOWN_BUTTON_CLASS}.${STATUS_BAR_NAV_PRESSING_CLASS} {
+          transform: none;
+          box-shadow: none;
+        }
+      }
+
       .${STATUS_BAR_TOGGLE_BUTTON_CLASS} {
         flex: 0 0 auto;
         width: 22px;
@@ -408,11 +455,22 @@
         cursor: pointer;
         pointer-events: auto;
         touch-action: manipulation;
+        transition: transform 120ms ease, background-color 120ms ease, box-shadow 180ms ease, border-color 120ms ease;
       }
 
       .${STATUS_BAR_NAV_UP_BUTTON_CLASS}:hover,
       .${STATUS_BAR_NAV_DOWN_BUTTON_CLASS}:hover {
         background: rgba(255, 255, 255, 0.16);
+      }
+
+      .${STATUS_BAR_NAV_UP_BUTTON_CLASS}.${STATUS_BAR_NAV_PRESSING_CLASS},
+      .${STATUS_BAR_NAV_DOWN_BUTTON_CLASS}.${STATUS_BAR_NAV_PRESSING_CLASS} {
+        transform: scale(0.92);
+        background: rgba(255, 255, 255, 0.24);
+        border-color: rgba(154, 199, 255, 0.8);
+        box-shadow:
+          0 0 0 1px var(--SmartThemeEmColor, #9ac7ff),
+          0 0 8px rgba(154, 199, 255, 0.35);
       }
 
       .${STATUS_BAR_NAV_UP_BUTTON_CLASS}:active,
@@ -1013,6 +1071,13 @@
     return Boolean(config?.status_bar_collapsed);
   }
 
+  function isStatusBarWorking(job = null) {
+    const targetJob = job || activeJob;
+    if (!targetJob) return false;
+    if (targetJob.foregroundStopped) return false;
+    return !targetJob.aborted && !isJobTerminal(targetJob);
+  }
+
   function applyStatusBarCollapsedState(bar, collapsed) {
     if (!isDomElement(bar)) return;
     const textNode = bar.querySelector(`.${STATUS_BAR_TEXT_CLASS}`);
@@ -1095,6 +1160,7 @@
 
   function onStatusBarContainerClick(event) {
     if (!isStatusBarCollapsed()) return;
+    if (eventPathContainsStatusBarControl(event)) return;
     toggleStatusBarCollapsed(event);
   }
 
@@ -1294,11 +1360,44 @@
     return false;
   }
 
+  function resolveNavButtonFromEvent(event) {
+    const currentTarget = event?.currentTarget;
+    if (isDomElement(currentTarget)) return currentTarget;
+    const target = getEventTargetElement(event);
+    if (!isDomElement(target) || typeof target.closest !== 'function') return null;
+    const button = target.closest(`.${STATUS_BAR_NAV_UP_BUTTON_CLASS}, .${STATUS_BAR_NAV_DOWN_BUTTON_CLASS}`);
+    return isDomElement(button) ? button : null;
+  }
+
+  function clearNavPressFeedback(button) {
+    if (!isDomElement(button)) return;
+    const timer = navPressFeedbackTimers.get(button);
+    if (timer) {
+      clearTimeout(timer);
+      navPressFeedbackTimers.delete(button);
+    }
+    button.classList.remove(STATUS_BAR_NAV_PRESSING_CLASS);
+  }
+
+  function triggerNavPressFeedback(button) {
+    if (!isDomElement(button)) return;
+    clearNavPressFeedback(button);
+    // Force reflow so rapid clicks can replay the feedback animation.
+    void button.offsetWidth;
+    button.classList.add(STATUS_BAR_NAV_PRESSING_CLASS);
+    const timer = setTimeout(() => {
+      button.classList.remove(STATUS_BAR_NAV_PRESSING_CLASS);
+      navPressFeedbackTimers.delete(button);
+    }, 160);
+    navPressFeedbackTimers.set(button, timer);
+  }
+
   function onNavUpButtonClick(event) {
     const eventType = event?.type || 'click';
-    if (shouldSkipDuplicateNavAction('up', eventType)) return;
     event.stopPropagation();
     event.preventDefault();
+    triggerNavPressFeedback(resolveNavButtonFromEvent(event));
+    if (shouldSkipDuplicateNavAction('up', eventType)) return;
     void navigateFloor('up');
   }
 
@@ -1312,9 +1411,10 @@
 
   function onNavDownButtonClick(event) {
     const eventType = event?.type || 'click';
-    if (shouldSkipDuplicateNavAction('down', eventType)) return;
     event.stopPropagation();
     event.preventDefault();
+    triggerNavPressFeedback(resolveNavButtonFromEvent(event));
+    if (shouldSkipDuplicateNavAction('down', eventType)) return;
     void navigateFloor('down');
   }
 
@@ -1327,6 +1427,7 @@
   }
 
   function onNavButtonPointerDown(event) {
+    triggerNavPressFeedback(resolveNavButtonFromEvent(event));
     event.preventDefault();
     event.stopPropagation();
     if (typeof event.stopImmediatePropagation === 'function') {
@@ -1546,10 +1647,10 @@
     let toggleButton = bar.querySelector(`.${STATUS_BAR_TOGGLE_BUTTON_CLASS}`);
     if (!toggleButton) {
       toggleButton = hostDocument.createElement('button');
+      toggleButton.textContent = '✦';
     }
     toggleButton.type = 'button';
     toggleButton.className = STATUS_BAR_TOGGLE_BUTTON_CLASS;
-    toggleButton.textContent = '✦';
     toggleButton.setAttribute('aria-label', '最小化状态栏');
     toggleButton.removeEventListener('click', onStatusBarToggleButtonClick);
     toggleButton.addEventListener('click', onStatusBarToggleButtonClick);
@@ -1620,7 +1721,14 @@
     navDownButton.removeEventListener('touchend', onNavDownButtonTouchEnd);
     navDownButton.addEventListener('touchend', onNavDownButtonTouchEnd, { passive: false });
 
-    bar.replaceChildren(toggleButton, dotsNode, textNode, navUpButton, navDownButton, settingsButton);
+    const desiredChildren = [toggleButton, dotsNode, textNode, navUpButton, navDownButton, settingsButton];
+    const currentChildren = Array.from(bar.children);
+    const needsReplaceChildren = currentChildren.length !== desiredChildren.length
+      || desiredChildren.some((node, index) => currentChildren[index] !== node);
+
+    if (needsReplaceChildren) {
+      bar.replaceChildren(...desiredChildren);
+    }
 
     if (bar.parentElement !== body) {
       body.appendChild(bar);
@@ -1650,9 +1758,24 @@
     const simpleMode = isStatusBarSimpleMode();
     bar.classList.toggle(STATUS_BAR_SIMPLE_MODE_CLASS, simpleMode);
     const isCollapsed = isStatusBarCollapsed();
+    const isWorking = isStatusBarWorking(options.job);
+    bar.classList.toggle(STATUS_BAR_WORKING_CLASS, isWorking);
     applyStatusBarCollapsedState(bar, isCollapsed);
     if (toggleButton) {
-      const actionText = isCollapsed ? '展开状态栏' : '最小化为图标';
+      if (isCollapsed && isWorking) {
+        const hasSpinner = Boolean(toggleButton.querySelector('.gemini-parallel-status-spinner'));
+        if (!hasSpinner) {
+          toggleButton.innerHTML = '<i class="fa-solid fa-spinner gemini-parallel-status-spinner" aria-hidden="true"></i>';
+        }
+      } else {
+        const hasOnlyDefaultIcon = toggleButton.textContent === '✦' && !toggleButton.querySelector('i');
+        if (!hasOnlyDefaultIcon) {
+          toggleButton.textContent = '✦';
+        }
+      }
+      const actionText = isCollapsed
+        ? (isWorking ? '工作中（点击展开）' : '展开状态栏')
+        : '最小化为图标';
       toggleButton.title = actionText;
       toggleButton.setAttribute('aria-label', actionText);
     }
@@ -2015,6 +2138,45 @@
     return clampMinReplyTokens(config?.min_reply_tokens ?? DEFAULT_MIN_REPLY_TOKENS);
   }
 
+  function normalizeBooleanFlag(value, fallback) {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      if (value === 1) return true;
+      if (value === 0) return false;
+    }
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'true' || normalized === '1') return true;
+      if (normalized === 'false' || normalized === '0') return false;
+    }
+    return fallback;
+  }
+
+  function getScriptVariableScopes() {
+    const scopes = [];
+    const rawScriptId = typeof getScriptId === 'function' ? getScriptId() : '';
+    const scriptId = String(rawScriptId ?? '').trim();
+    if (scriptId) {
+      scopes.push({ type: 'script', script_id: scriptId });
+    }
+    scopes.push({ type: 'script' });
+    return scopes;
+  }
+
+  function parseStoredConfigCandidate(rawValue) {
+    if (!rawValue) return null;
+    if (typeof rawValue === 'object') return rawValue;
+    if (typeof rawValue !== 'string') return null;
+    const text = rawValue.trim();
+    if (!text) return null;
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
   function normalizeWorldbookSwitcherConfig(rawConfig) {
     const raw = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
     const defaults = DEFAULT_CONFIG.worldbook_switcher;
@@ -2037,19 +2199,15 @@
     }
 
     return {
-      simpleMode: typeof raw.simpleMode === 'boolean' ? raw.simpleMode : defaults.simpleMode,
+      simpleMode: normalizeBooleanFlag(raw.simpleMode, defaults.simpleMode),
       favoriteWorldbooks: Array.isArray(raw.favoriteWorldbooks)
         ? raw.favoriteWorldbooks.filter(item => typeof item === 'string')
         : [...defaults.favoriteWorldbooks],
       currentWorldbook: typeof raw.currentWorldbook === 'string' ? raw.currentWorldbook : defaults.currentWorldbook,
       entryUsageStats,
       panelState: {
-        allWorldbooks: typeof rawPanelState.allWorldbooks === 'boolean'
-          ? rawPanelState.allWorldbooks
-          : defaults.panelState.allWorldbooks,
-        frequentEntries: typeof rawPanelState.frequentEntries === 'boolean'
-          ? rawPanelState.frequentEntries
-          : defaults.panelState.frequentEntries,
+        allWorldbooks: normalizeBooleanFlag(rawPanelState.allWorldbooks, defaults.panelState.allWorldbooks),
+        frequentEntries: normalizeBooleanFlag(rawPanelState.frequentEntries, defaults.panelState.frequentEntries),
       },
       pinnedWorldbooks: Array.isArray(raw.pinnedWorldbooks)
         ? raw.pinnedWorldbooks.filter(item => typeof item === 'string')
@@ -2060,36 +2218,37 @@
   function normalizeConfig(rawConfig) {
     const raw = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
     return {
-      enabled: typeof raw.enabled === 'boolean' ? raw.enabled : DEFAULT_CONFIG.enabled,
+      enabled: normalizeBooleanFlag(raw.enabled, DEFAULT_CONFIG.enabled),
       max_parallel_cap: clampParallelCap(raw.max_parallel_cap ?? DEFAULT_CONFIG.max_parallel_cap),
       retry_count: clampRetryCount(raw.retry_count ?? DEFAULT_CONFIG.retry_count),
       retry_delay_ms: clampRetryDelayMs(raw.retry_delay_ms ?? DEFAULT_CONFIG.retry_delay_ms),
       min_reply_tokens: clampMinReplyTokens(raw.min_reply_tokens ?? DEFAULT_CONFIG.min_reply_tokens),
       parallel_temperatures: normalizeParallelTemperatures(raw.parallel_temperatures ?? DEFAULT_CONFIG.parallel_temperatures),
       status_bar_position: normalizeStatusBarPosition(raw.status_bar_position ?? DEFAULT_CONFIG.status_bar_position),
-      status_bar_collapsed: typeof raw.status_bar_collapsed === 'boolean'
-        ? raw.status_bar_collapsed
-        : DEFAULT_CONFIG.status_bar_collapsed,
-      status_bar_simple_mode: typeof raw.status_bar_simple_mode === 'boolean'
-        ? raw.status_bar_simple_mode
-        : DEFAULT_CONFIG.status_bar_simple_mode,
-      old_floor_swipe_enabled: typeof raw.old_floor_swipe_enabled === 'boolean'
-        ? raw.old_floor_swipe_enabled
-        : DEFAULT_CONFIG.old_floor_swipe_enabled,
-      worldbook_switcher_enabled: typeof raw.worldbook_switcher_enabled === 'boolean'
-        ? raw.worldbook_switcher_enabled
-        : DEFAULT_CONFIG.worldbook_switcher_enabled,
+      status_bar_collapsed: normalizeBooleanFlag(raw.status_bar_collapsed, DEFAULT_CONFIG.status_bar_collapsed),
+      status_bar_simple_mode: normalizeBooleanFlag(raw.status_bar_simple_mode, DEFAULT_CONFIG.status_bar_simple_mode),
+      old_floor_swipe_enabled: normalizeBooleanFlag(raw.old_floor_swipe_enabled, DEFAULT_CONFIG.old_floor_swipe_enabled),
+      worldbook_switcher_enabled: normalizeBooleanFlag(
+        raw.worldbook_switcher_enabled,
+        DEFAULT_CONFIG.worldbook_switcher_enabled,
+      ),
       worldbook_switcher: normalizeWorldbookSwitcherConfig(raw.worldbook_switcher),
     };
   }
 
   function loadConfig() {
     try {
-      const scriptId = typeof getScriptId === 'function' ? getScriptId() : undefined;
-      const vars = typeof getVariables === 'function'
-        ? getVariables({ type: 'script', script_id: scriptId })
-        : {};
-      return normalizeConfig(vars ? vars[CONFIG_KEY] : undefined);
+      if (typeof getVariables !== 'function') {
+        return normalizeConfig(undefined);
+      }
+      for (const scope of getScriptVariableScopes()) {
+        const vars = getVariables(scope);
+        const parsed = parseStoredConfigCandidate(vars?.[CONFIG_KEY]);
+        if (parsed) {
+          return normalizeConfig(parsed);
+        }
+      }
+      return normalizeConfig(undefined);
     } catch (error) {
       warn('读取脚本变量失败，使用默认配置:', error);
       return normalizeConfig(undefined);
@@ -2099,12 +2258,15 @@
   async function saveConfig() {
     try {
       if (typeof insertOrAssignVariables !== 'function') return false;
-      const scriptId = typeof getScriptId === 'function' ? getScriptId() : undefined;
-      const result = insertOrAssignVariables({ [CONFIG_KEY]: config }, { type: 'script', script_id: scriptId });
-      if (result && typeof result.then === 'function') {
-        await result;
+      let saved = false;
+      for (const scope of getScriptVariableScopes()) {
+        const result = insertOrAssignVariables({ [CONFIG_KEY]: config }, scope);
+        if (result && typeof result.then === 'function') {
+          await result;
+        }
+        saved = true;
       }
-      return true;
+      return saved;
     } catch (error) {
       warn('保存脚本变量失败:', error);
       return false;
@@ -3832,6 +3994,22 @@
       }
 
       if (!shouldArmParallelJob({ generationType, source, desiredN })) {
+        if (
+          config.enabled
+          && shouldValidateForegroundMinReplyTokens()
+          && desiredN === 1
+          && generateData
+          && typeof generateData === 'object'
+        ) {
+          const foregroundSession = updateForegroundPayloadSnapshot(generateData);
+          debug('前台生成参数快照已更新（n=1，仅用于最小长度校验）', {
+            generationSeq: foregroundSession?.generationSeq,
+            hasPayload: Boolean(foregroundSession?.payloadSnapshot),
+            desiredN,
+            source,
+          });
+        }
+
         debug('跳过本次并发初始化：未满足触发条件', {
           generationType,
           source,
@@ -3945,6 +4123,7 @@
 
     job.foregroundStopped = true;
     job.foregroundValidationDone = true;
+    refreshStatusBarForRetryState();
     void tryFinalizeJob(job);
   }
 
@@ -6685,6 +6864,7 @@
     runSafe('中止前台校验', () => abortForegroundValidation('脚本实例销毁'));
     activeForegroundSession = null;
     runSafe('移除状态栏', () => removeAllParallelStatusBars());
+    runSafe('清理前台重试补丁', () => cleanupGenerateFetchRetryPatch());
 
     runSafe('清理旧楼层 Swipe', () => destroyOldFloorSwipe());
     runSafe('清理 worldbook switcher', () => destroyWorldbookSwitcher());
@@ -6731,6 +6911,7 @@
   function init() {
     // 先暴露 API，避免任何后续模块异常导致调试入口缺失
     exposeDebugApi();
+    runSafe('安装前台重试补丁', () => installGenerateFetchRetryPatch());
 
     if (config.old_floor_swipe_enabled) {
       runSafe('初始化旧楼层 Swipe', () => initOldFloorSwipe());
