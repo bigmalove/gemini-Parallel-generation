@@ -1,7 +1,7 @@
 {
-  "id": "gemini-parallel-swipe-003",
+  "id": "gemini-parallel-swipe-004",
   "name": "Gemini并发生成",
-  "content": "import 'https://gcore.jsdelivr.net/gh/bigmalove/gemini-Parallel-generation@v3.0/extracted-gemini-parallel.js'",
+  "content": "import 'https://gcore.jsdelivr.net/gh/bigmalove/gemini-Parallel-generation@v4.0/extracted-gemini-parallel.js'",
   "info": "并发补全：支持 makersuite / vertexai / openai / custom / openrouter / azure_openai。\n触发条件为请求目标 n>1（并满足支持源与生成类型 normal/regenerate/continue）。\nopenai/custom/openrouter/azure_openai 采用前台 n=1 + 脚本并发补齐。\n\n版本: v2.0",
   "buttons": []
 }
