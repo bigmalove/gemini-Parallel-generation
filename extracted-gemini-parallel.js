@@ -46,6 +46,8 @@
     retry_count: 5,
     retry_delay_ms: 1000,
     min_reply_tokens: 0,
+    auction_mode_enabled: false,
+    silent_mode_enabled: true,
     parallel_temperatures: [],
     status_bar_position: null,
     status_bar_collapsed: false,
@@ -162,6 +164,10 @@
       flushedCount: Number(job.flushedCount) || 0,
       writtenCount: Number(job.writtenCount) || 0,
       writeFailedCount: Number(job.writeFailedCount) || 0,
+      auctionEnabled: Boolean(job.auctionEnabled),
+      winnerSource: job.winnerSource || null,
+      winnerMessageId: Number.isFinite(Number(job.winnerMessageId)) ? Number(job.winnerMessageId) : null,
+      winnerWriteDone: Boolean(job.winnerWriteDone),
       pendingWriteCount: Math.max(
         0,
         (Array.isArray(job.bufferedTexts) ? job.bufferedTexts.length : 0) - (Number(job.flushedCount) || 0),
@@ -171,6 +177,7 @@
   }
 
   function infoToast(message) {
+    if (isSilentModeEnabled()) return;
     const hostWindow = getHostWindow();
     if (hostWindow.toastr && typeof hostWindow.toastr.info === 'function') {
       hostWindow.toastr.info(message, 'Gemini并发生成');
@@ -178,6 +185,7 @@
   }
 
   function successToast(message) {
+    if (isSilentModeEnabled()) return;
     const hostWindow = getHostWindow();
     if (hostWindow.toastr && typeof hostWindow.toastr.success === 'function') {
       hostWindow.toastr.success(message, 'Gemini并发生成');
@@ -185,6 +193,7 @@
   }
 
   function warningToast(message) {
+    if (isSilentModeEnabled()) return;
     const hostWindow = getHostWindow();
     if (hostWindow.toastr && typeof hostWindow.toastr.warning === 'function') {
       hostWindow.toastr.warning(message, 'Gemini并发生成');
@@ -192,6 +201,7 @@
   }
 
   function errorToast(message) {
+    if (isSilentModeEnabled()) return;
     const hostWindow = getHostWindow();
     if (hostWindow.toastr && typeof hostWindow.toastr.error === 'function') {
       hostWindow.toastr.error(message, 'Gemini并发生成');
@@ -951,6 +961,30 @@
       swipeRow.append(swipeLabel, swipeCheckbox);
       panel.appendChild(swipeRow);
 
+      const auctionRow = hostDocument.createElement('div');
+      auctionRow.className = SETTINGS_ROW_CLASS;
+      const auctionLabel = hostDocument.createElement('label');
+      auctionLabel.textContent = '竞标模式（有一个完成就停）';
+      auctionLabel.style.fontWeight = '700';
+      auctionLabel.style.color = 'var(--SmartThemeBodyColor, #f5f7fa)';
+      const auctionCheckbox = hostDocument.createElement('input');
+      auctionCheckbox.type = 'checkbox';
+      auctionCheckbox.checked = isAuctionModeEnabled();
+      auctionRow.append(auctionLabel, auctionCheckbox);
+      panel.appendChild(auctionRow);
+
+      const silentRow = hostDocument.createElement('div');
+      silentRow.className = SETTINGS_ROW_CLASS;
+      const silentLabel = hostDocument.createElement('label');
+      silentLabel.textContent = '静默模式（不弹提示）';
+      silentLabel.style.fontWeight = '700';
+      silentLabel.style.color = 'var(--SmartThemeBodyColor, #f5f7fa)';
+      const silentCheckbox = hostDocument.createElement('input');
+      silentCheckbox.type = 'checkbox';
+      silentCheckbox.checked = isSilentModeEnabled();
+      silentRow.append(silentLabel, silentCheckbox);
+      panel.appendChild(silentRow);
+
       const wbRow = hostDocument.createElement('div');
       wbRow.className = SETTINGS_ROW_CLASS;
       const wbLabel = hostDocument.createElement('label');
@@ -1010,6 +1044,8 @@
       }
       const nextParallelTemperatures = parsedParallelTemperatures.values;
       const nextOldFloorSwipeEnabled = Boolean(swipeCheckbox.checked);
+      const nextAuctionModeEnabled = Boolean(auctionCheckbox.checked);
+      const nextSilentModeEnabled = Boolean(silentCheckbox.checked);
       const nextWorldbookSwitcherEnabled = Boolean(wbCheckbox.checked);
       const nextStatusBarSimpleMode = Boolean(statusBarSimpleCheckbox.checked);
       const moduleSwitchChanged = nextOldFloorSwipeEnabled !== Boolean(config.old_floor_swipe_enabled)
@@ -1020,6 +1056,8 @@
         retry_count: nextRetryCount,
         retry_delay_ms: nextRetryDelayMs,
         min_reply_tokens: nextMinReplyTokens,
+        auction_mode_enabled: nextAuctionModeEnabled,
+        silent_mode_enabled: nextSilentModeEnabled,
         parallel_temperatures: nextParallelTemperatures,
         status_bar_simple_mode: nextStatusBarSimpleMode,
         old_floor_swipe_enabled: nextOldFloorSwipeEnabled,
@@ -2138,6 +2176,14 @@
     return clampMinReplyTokens(config?.min_reply_tokens ?? DEFAULT_MIN_REPLY_TOKENS);
   }
 
+  function isAuctionModeEnabled() {
+    return normalizeBooleanFlag(config?.auction_mode_enabled, DEFAULT_CONFIG.auction_mode_enabled);
+  }
+
+  function isSilentModeEnabled() {
+    return normalizeBooleanFlag(config?.silent_mode_enabled, DEFAULT_CONFIG.silent_mode_enabled);
+  }
+
   function normalizeBooleanFlag(value, fallback) {
     if (typeof value === 'boolean') return value;
     if (typeof value === 'number' && Number.isFinite(value)) {
@@ -2223,6 +2269,14 @@
       retry_count: clampRetryCount(raw.retry_count ?? DEFAULT_CONFIG.retry_count),
       retry_delay_ms: clampRetryDelayMs(raw.retry_delay_ms ?? DEFAULT_CONFIG.retry_delay_ms),
       min_reply_tokens: clampMinReplyTokens(raw.min_reply_tokens ?? DEFAULT_CONFIG.min_reply_tokens),
+      auction_mode_enabled: normalizeBooleanFlag(
+        raw.auction_mode_enabled,
+        DEFAULT_CONFIG.auction_mode_enabled,
+      ),
+      silent_mode_enabled: normalizeBooleanFlag(
+        raw.silent_mode_enabled,
+        DEFAULT_CONFIG.silent_mode_enabled,
+      ),
       parallel_temperatures: normalizeParallelTemperatures(raw.parallel_temperatures ?? DEFAULT_CONFIG.parallel_temperatures),
       status_bar_position: normalizeStatusBarPosition(raw.status_bar_position ?? DEFAULT_CONFIG.status_bar_position),
       status_bar_collapsed: normalizeBooleanFlag(raw.status_bar_collapsed, DEFAULT_CONFIG.status_bar_collapsed),
@@ -2791,6 +2845,10 @@
     const payload = deepClone(basePayload || {});
     payload.stream = false;
     payload.n = 1;
+    const generationId = String(options.generationId || '').trim();
+    if (generationId) {
+      payload.generation_id = generationId;
+    }
 
     const overrideTemperature = Number(options.temperatureOverride);
     if (Number.isFinite(overrideTemperature)) {
@@ -2937,20 +2995,29 @@
     const requestTemperature = resolveParallelRequestTemperature(job, index);
     const source = job?.basePayload?.chat_completion_source || job?.basePayload?.chat_comletion_source;
     const startedAt = Date.now();
+    const requestGenerationId = `gemini_parallel_${job?.id || 'job'}_${index}_${startedAt}`;
     debug('并发子请求开始', {
       jobId: job?.id,
       index,
       model: job?.basePayload?.model,
       source,
       temperature: requestTemperature,
+      generationId: requestGenerationId,
     });
 
     const controller = new AbortController();
     job.controllers.push(controller);
+    if (!Array.isArray(job.parallelRequestIds)) {
+      job.parallelRequestIds = [];
+    }
+    if (!job.parallelRequestIds.includes(requestGenerationId)) {
+      job.parallelRequestIds.push(requestGenerationId);
+    }
     const result = await requestSingleCompletionWithRetry({
       payload: job.basePayload,
       payloadOptions: {
         temperatureOverride: requestTemperature,
+        generationId: requestGenerationId,
       },
       signal: controller.signal,
       requestName: `请求 #${index}`,
@@ -3058,6 +3125,165 @@
     return latestMessages[latestMessages.length - 1] || null;
   }
 
+  function regexFromStringLikeTavern(input) {
+    if (typeof input !== 'string' || !input) {
+      return null;
+    }
+
+    try {
+      const matched = input.match(/(\/?)(.+)\1([a-z]*)/i);
+      if (!matched) {
+        return new RegExp(input);
+      }
+
+      if (matched[3] && !/^(?!.*?(.).*?\1)[gmixXsuUAJ]+$/.test(matched[3])) {
+        return RegExp(input);
+      }
+
+      return new RegExp(matched[2], matched[3]);
+    } catch {
+      return null;
+    }
+  }
+
+  function resolveMessageRegexDepth(messageId) {
+    const normalizedId = normalizeMessageId(messageId);
+    if (normalizedId === null || typeof getChatMessages !== 'function') {
+      return null;
+    }
+
+    let lastMessageId = normalizedId;
+    if (typeof getLastMessageId === 'function') {
+      const rawLastId = Number(getLastMessageId());
+      if (Number.isFinite(rawLastId) && rawLastId >= 0) {
+        lastMessageId = Math.floor(rawLastId);
+      }
+    }
+
+    try {
+      const messages = getChatMessages(`0-${lastMessageId}`, {
+        hide_state: 'all',
+      });
+      if (!Array.isArray(messages) || messages.length === 0) {
+        return null;
+      }
+
+      const usableMessages = messages.filter(item => item && item.role !== 'system');
+      const targetIndex = usableMessages.findIndex(item => Number(item?.message_id) === normalizedId);
+      if (targetIndex === -1) {
+        return null;
+      }
+
+      return usableMessages.length - targetIndex - 1;
+    } catch (error) {
+      warn('计算消息正则深度失败:', error);
+      return null;
+    }
+  }
+
+  function getEnabledTavernRegexesInOrder() {
+    if (typeof getTavernRegexes !== 'function') {
+      return [];
+    }
+
+    try {
+      const globalRegexes = getTavernRegexes({
+        scope: 'global',
+        enable_state: 'enabled',
+      }) || [];
+      const canUseCharacterRegexes = typeof isCharacterTavernRegexesEnabled !== 'function'
+        ? true
+        : isCharacterTavernRegexesEnabled();
+      const characterRegexes = canUseCharacterRegexes
+        ? (getTavernRegexes({
+            scope: 'character',
+            enable_state: 'enabled',
+          }) || [])
+        : [];
+
+      return [...globalRegexes, ...characterRegexes];
+    } catch (error) {
+      warn('获取酒馆正则失败:', error);
+      return [];
+    }
+  }
+
+  function shouldApplyTavernRegex(regex, { depth = null } = {}) {
+    if (!regex || regex.enabled === false) {
+      return false;
+    }
+
+    if (regex.source && regex.source.ai_output === false) {
+      return false;
+    }
+
+    if (regex.destination && regex.destination.display === false) {
+      return false;
+    }
+
+    if (typeof depth === 'number') {
+      const minDepth = Number(regex.min_depth);
+      if (regex.min_depth !== null && Number.isFinite(minDepth) && minDepth >= -1 && depth < minDepth) {
+        return false;
+      }
+
+      const maxDepth = Number(regex.max_depth);
+      if (regex.max_depth !== null && Number.isFinite(maxDepth) && maxDepth >= 0 && depth > maxDepth) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  function applyTavernAiOutputRegexes(text, { messageId = null, depth = null } = {}) {
+    const input = String(text ?? '');
+    if (!input) {
+      return input;
+    }
+
+    if (typeof getTavernRegexes !== 'function') {
+      warn('getTavernRegexes 不可用，跳过正则处理');
+      return input;
+    }
+
+    const resolvedDepth = typeof depth === 'number' && Number.isFinite(depth)
+      ? Math.max(0, Math.floor(depth))
+      : resolveMessageRegexDepth(messageId);
+
+    try {
+      const regexes = getEnabledTavernRegexesInOrder();
+      if (!Array.isArray(regexes) || regexes.length === 0) {
+        return input;
+      }
+
+      let result = input;
+      for (const regex of regexes) {
+        if (!shouldApplyTavernRegex(regex, { depth: resolvedDepth })) {
+          continue;
+        }
+
+        try {
+          const pattern = regexFromStringLikeTavern(String(regex.find_regex || ''));
+          if (!pattern) {
+            warn(`正则 "${regex.script_name || regex.id || 'unknown'}" 编译失败，已跳过`);
+            continue;
+          }
+
+          const replacement = String(regex.replace_string ?? '').replace(/{{match}}/gi, '$&');
+          result = result.replace(pattern, replacement);
+        } catch (error) {
+          warn(`正则 "${regex.script_name || regex.id || 'unknown'}" 应用失败:`, error);
+        }
+      }
+
+      return result;
+    } catch (error) {
+      warn('正则处理失败:', error);
+      return input;
+    }
+  }
+
   function normalizeMessageId(value) {
     if (value === null || value === undefined) {
       return null;
@@ -3107,11 +3333,14 @@
       .filter(Boolean);
   }
 
-  async function appendSwipes(messageId, newSwipes) {
-    if (!Array.isArray(newSwipes) || newSwipes.length === 0) return;
+  async function appendSwipes(messageId, newSwipes, options = {}) {
+    if (!Array.isArray(newSwipes) || newSwipes.length === 0) {
+      return { appended: false, messageId: null, swipeId: null };
+    }
     debug('准备追加 swipes', {
       messageId,
       inputCount: Array.isArray(newSwipes) ? newSwipes.length : 0,
+      activateNewest: Boolean(options?.activateNewest),
     });
 
     if (typeof getChatMessages !== 'function' || typeof setChatMessages !== 'function') {
@@ -3121,30 +3350,35 @@
     const message = readMessageById(messageId, true) || readMessageById(messageId, false);
     if (!message) {
       warn('找不到目标楼层，已跳过 swipe 追加:', { messageId });
-      return false;
+      return { appended: false, messageId: null, swipeId: null };
     }
 
     const existing = Array.isArray(message.swipes) && message.swipes.length > 0
       ? message.swipes.slice()
       : [String(message.message || '')];
+    const targetMessageId = Number(message.message_id);
 
-    const sanitizedNewSwipes = sanitizeGeneratedTexts(newSwipes);
+    if (!Number.isFinite(targetMessageId) || targetMessageId < 0) {
+      warn('目标楼层 message_id 非法，已跳过 swipe 追加:', { messageId, targetMessageId });
+      return { appended: false, messageId: null, swipeId: null };
+    }
+
+    const sanitizedNewSwipes = sanitizeGeneratedTexts(newSwipes)
+      .map(text => applyTavernAiOutputRegexes(text, { messageId: targetMessageId }))
+      .map(text => String(text || '').trim())
+      .filter(Boolean);
 
     if (sanitizedNewSwipes.length === 0) {
       debug('追加 swipes 已跳过，清洗后为空', { messageId });
-      return false;
+      return { appended: false, messageId: targetMessageId, swipeId: null };
     }
 
     const merged = existing.concat(sanitizedNewSwipes);
     const rawSwipeId = Number(message.swipe_id);
     const swipeId = Number.isFinite(rawSwipeId) ? Math.max(0, Math.floor(rawSwipeId)) : 0;
-    const clampedSwipeId = Math.min(swipeId, Math.max(0, merged.length - 1));
-    const targetMessageId = Number(message.message_id);
-
-    if (!Number.isFinite(targetMessageId) || targetMessageId < 0) {
-      warn('目标楼层 message_id 非法，已跳过 swipe 追加:', { messageId, targetMessageId });
-      return false;
-    }
+    const clampedSwipeId = Boolean(options?.activateNewest)
+      ? Math.max(0, merged.length - 1)
+      : Math.min(swipeId, Math.max(0, merged.length - 1));
 
     await setChatMessages(
       [{ message_id: targetMessageId, swipes: merged, swipe_id: clampedSwipeId }],
@@ -3159,7 +3393,11 @@
       swipeId: clampedSwipeId,
     });
 
-    return true;
+    return {
+      appended: true,
+      messageId: targetMessageId,
+      swipeId: clampedSwipeId,
+    };
   }
 
   function resolveWriteTarget(job) {
@@ -3309,6 +3547,9 @@
       generationSeq: Number(generationSeq) || 0,
       payloadSnapshot: null,
       stopped: false,
+      awaitingGenerationId: true,
+      foregroundGenerationId: '',
+      startedAt: Date.now(),
       validationPromise: null,
       validationController: null,
     };
@@ -3318,6 +3559,7 @@
     const session = activeForegroundSession;
     if (!session) return;
     session.stopped = true;
+    session.awaitingGenerationId = false;
     if (session.validationController) {
       try {
         session.validationController.abort();
@@ -3368,7 +3610,118 @@
     const session = getOrCreateForegroundSession();
     session.payloadSnapshot = deepClone(generateData || {});
     session.stopped = false;
+    session.awaitingGenerationId = true;
+    session.foregroundGenerationId = '';
+    session.startedAt = Date.now();
     return session;
+  }
+
+  function isAuctionJob(job) {
+    return Boolean(job?.auctionEnabled);
+  }
+
+  function rememberForegroundGenerationId(generationId) {
+    const job = activeJob;
+    const session = activeForegroundSession;
+    if (!isAuctionJob(job) || !session || session.stopped || !session.awaitingGenerationId) {
+      return false;
+    }
+
+    const normalizedGenerationId = String(generationId || '').trim();
+    if (!normalizedGenerationId) {
+      return false;
+    }
+
+    session.foregroundGenerationId = normalizedGenerationId;
+    session.awaitingGenerationId = false;
+    debug('已记录前台 generation_id', {
+      jobId: job?.id,
+      generationSeq: session.generationSeq,
+      generationId: normalizedGenerationId,
+    });
+    return true;
+  }
+
+  function stopForegroundGenerationForAuction(job, reason = '竞标模式已选出赢家') {
+    if (!isAuctionJob(job) || isJobTerminal(job)) {
+      return false;
+    }
+
+    const session = activeForegroundSession;
+    let stopped = false;
+    const generationId = String(session?.foregroundGenerationId || '').trim();
+
+    if (generationId && typeof stopGenerationById === 'function') {
+      try {
+        stopped = Boolean(stopGenerationById(generationId));
+      } catch (error) {
+        warn('stopGenerationById 调用失败:', error);
+      }
+    }
+
+    if (!stopped && activeJob && activeJob.id === job.id && typeof stopAllGeneration === 'function') {
+      try {
+        stopped = Boolean(stopAllGeneration());
+      } catch (error) {
+        warn('stopAllGeneration 调用失败:', error);
+      }
+    }
+
+    if (stopped) {
+      job.foregroundStopRequested = true;
+      debug('已请求停止前台生成', {
+        jobId: job.id,
+        reason,
+        generationId: generationId || null,
+      });
+    }
+
+    return stopped;
+  }
+
+  function stopParallelRequestGenerations(job, reason = '停止后台并发子请求', options = {}) {
+    if (!job || isJobTerminal(job)) {
+      return false;
+    }
+
+    const ids = Array.isArray(job.parallelRequestIds) ? job.parallelRequestIds : [];
+    let stopped = false;
+
+    if (typeof stopGenerationById === 'function') {
+      for (const requestId of ids) {
+        const normalizedId = String(requestId || '').trim();
+        if (!normalizedId) continue;
+        try {
+          stopped = Boolean(stopGenerationById(normalizedId)) || stopped;
+        } catch (error) {
+          warn('stopGenerationById(后台并发) 调用失败:', error);
+        }
+      }
+    }
+
+    if (
+      !stopped
+      && options?.fallbackStopAll
+      && activeJob
+      && activeJob.id === job.id
+      && typeof stopAllGeneration === 'function'
+    ) {
+      try {
+        stopped = Boolean(stopAllGeneration()) || stopped;
+      } catch (error) {
+        warn('stopAllGeneration(后台并发) 调用失败:', error);
+      }
+    }
+
+    if (stopped) {
+      debug('已请求停止后台并发子请求', {
+        jobId: job.id,
+        reason,
+        requestCount: ids.length,
+      });
+    }
+
+    return stopped;
   }
 
   function resolveEndedAssistantMessageId(rawEndedValue) {
@@ -3412,20 +3765,20 @@
       throw new Error('setChatMessages 不可用');
     }
 
-    const normalizedText = String(text || '').trim();
-    if (!normalizedText) {
-      throw new Error('写入文本为空');
-    }
-
     const message = readMessageById(messageId, true) || readMessageById(messageId, false);
     if (!message || !Number.isFinite(Number(message.message_id))) {
       throw new Error(`目标楼层不存在: ${messageId}`);
     }
 
     const targetMessageId = Number(message.message_id);
+    const normalizedText = String(text || '').trim();
+    const processedText = applyTavernAiOutputRegexes(normalizedText, { messageId: targetMessageId }).trim();
+    if (!processedText) {
+      throw new Error('写入文本为空');
+    }
     const patch = {
       message_id: targetMessageId,
-      message: normalizedText,
+      message: processedText,
     };
 
     if (Array.isArray(message.swipes) && message.swipes.length > 0) {
@@ -3433,7 +3786,7 @@
       const swipeId = Number.isFinite(rawSwipeId) ? Math.max(0, Math.floor(rawSwipeId)) : 0;
       const clampedSwipeId = Math.min(swipeId, Math.max(0, message.swipes.length - 1));
       const nextSwipes = message.swipes.slice();
-      nextSwipes[clampedSwipeId] = normalizedText;
+      nextSwipes[clampedSwipeId] = processedText;
       patch.swipes = nextSwipes;
       patch.swipe_id = clampedSwipeId;
     }
@@ -3446,32 +3799,35 @@
     return getConfiguredMinReplyTokens() > 0;
   }
 
-  function markForegroundValidationDoneForJob(job) {
+  function markForegroundValidationDoneForJob(job, passed = null) {
     if (!job) return;
     job.foregroundValidationDone = true;
+    if (passed !== null) {
+      job.foregroundValidationPassed = Boolean(passed);
+    }
   }
 
   function runForegroundMinTokenValidation(messageId, job = null) {
     if (!shouldValidateForegroundMinReplyTokens()) {
-      markForegroundValidationDoneForJob(job);
+      markForegroundValidationDoneForJob(job, true);
       return null;
     }
 
     const session = getOrCreateForegroundSession();
     if (!session || session.stopped) {
-      markForegroundValidationDoneForJob(job);
+      markForegroundValidationDoneForJob(job, false);
       return null;
     }
     if (!session.payloadSnapshot || typeof session.payloadSnapshot !== 'object') {
       debug('前台最小长度校验跳过：缺少生成参数快照', { generationSeq: session?.generationSeq });
-      markForegroundValidationDoneForJob(job);
+      markForegroundValidationDoneForJob(job, false);
       return null;
     }
 
     const targetMessageId = Number(messageId);
     if (!Number.isFinite(targetMessageId) || targetMessageId < 0) {
       debug('前台最小长度校验跳过：message_id 无效', { messageId });
-      markForegroundValidationDoneForJob(job);
+      markForegroundValidationDoneForJob(job, false);
       return null;
     }
 
@@ -3483,11 +3839,13 @@
     session.validationController = controller;
 
     const runner = (async () => {
+      let validationPassed = false;
       try {
         const minReplyTokens = getConfiguredMinReplyTokens();
         const currentText = getMessageTextForValidation(targetMessageId);
         const currentTokenCount = await countTextTokens(currentText);
         if (currentTokenCount >= minReplyTokens) {
+          validationPassed = true;
           debug('前台回复已满足最小长度，无需补请求', {
             messageId: targetMessageId,
             tokenCount: currentTokenCount,
@@ -3511,6 +3869,7 @@
         });
 
         await replaceAssistantMessageText(targetMessageId, result.text);
+        validationPassed = true;
         debug('前台补请求完成并已覆盖楼层文本', {
           messageId: targetMessageId,
           tokenCount: result.tokenCount,
@@ -3531,7 +3890,7 @@
       } finally {
         session.validationController = null;
         session.validationPromise = null;
-        markForegroundValidationDoneForJob(job);
+        markForegroundValidationDoneForJob(job, validationPassed);
         refreshStatusBarForRetryState();
         if (job && activeJob && activeJob.id === job.id && !isJobTerminal(job)) {
           void tryFinalizeJob(job);
@@ -3577,7 +3936,10 @@
       throw new Error('createChatMessages/setChatMessages 不可用');
     }
 
-    const sanitized = sanitizeGeneratedTexts(newSwipes);
+    const sanitized = sanitizeGeneratedTexts(newSwipes)
+      .map(text => applyTavernAiOutputRegexes(text, { depth: 0 }))
+      .map(text => String(text || '').trim())
+      .filter(Boolean);
     if (sanitized.length === 0) {
       debug('新建 assistant 已跳过，清洗后无可写入文本', { jobId: job?.id });
       return { appended: false, messageId: null };
@@ -3639,6 +4001,174 @@
     return { appended: true, messageId: createdMessageId };
   }
 
+  function hasAuctionWinner(job) {
+    return isAuctionJob(job) && typeof job.winnerSource === 'string' && job.winnerSource.length > 0;
+  }
+
+  function claimAuctionWinner(job, source, text, options = {}) {
+    if (!isAuctionJob(job) || !job || isJobTerminal(job) || job.superseded || hasAuctionWinner(job)) {
+      return false;
+    }
+
+    const normalizedSource = source === 'foreground' ? 'foreground' : 'background';
+    const normalizedText = String(text || '').trim();
+    if (!normalizedText) {
+      return false;
+    }
+
+    job.winnerSource = normalizedSource;
+    job.winnerText = normalizedText;
+    job.winnerMessageId = normalizeMessageId(options.messageId);
+    job.winnerSwipeId = Number.isFinite(Number(options.swipeId)) ? Number(options.swipeId) : null;
+    job.auctionSettledAt = Date.now();
+    job.winnerWriteDone = normalizedSource === 'foreground';
+
+    if (job.winnerMessageId !== null) {
+      job.messageId = job.winnerMessageId;
+      job.targetMessageId = job.winnerMessageId;
+    }
+
+      debug('竞标模式已选出赢家', {
+        jobId: job.id,
+        source: normalizedSource,
+        messageId: job.winnerMessageId,
+        textLength: normalizedText.length,
+      });
+
+    abortJobControllers(job);
+    stopParallelRequestGenerations(job, `竞标模式赢家已产生(${normalizedSource})`, {
+      fallbackStopAll: normalizedSource === 'background',
+    });
+    if (normalizedSource === 'background') {
+      abortForegroundValidation('竞标模式后台候选已胜出');
+      stopForegroundGenerationForAuction(job, '竞标模式后台候选已胜出');
+      job.foregroundStopped = true;
+      job.foregroundValidationDone = true;
+      job.foregroundValidationPassed = false;
+    }
+
+    return true;
+  }
+
+  function tryClaimBackgroundAuctionWinner(job, text, options = {}) {
+    return claimAuctionWinner(job, 'background', text, options);
+  }
+
+  function tryClaimForegroundAuctionWinner(job) {
+    if (!isAuctionJob(job) || !job || hasAuctionWinner(job)) {
+      return false;
+    }
+    if (job.foregroundStopped) {
+      return false;
+    }
+    if (!job.foregroundEnded || !job.foregroundValidationDone) {
+      return false;
+    }
+    if (shouldValidateForegroundMinReplyTokens() && !job.foregroundValidationPassed) {
+      return false;
+    }
+
+    let targetMessageId = normalizeMessageId(job.targetMessageIdFromEvent) ?? normalizeMessageId(job.targetMessageId);
+    if (targetMessageId === null) {
+      const resolvedTarget = resolveWriteTarget(job);
+      if (resolvedTarget) {
+        job.writeTarget = resolvedTarget;
+      }
+      if (resolvedTarget?.mode === 'append_assistant') {
+        targetMessageId = normalizeMessageId(resolvedTarget.messageId);
+      }
+    }
+
+    if (targetMessageId === null) {
+      return false;
+    }
+
+    const currentText = String(getMessageTextForValidation(targetMessageId) || '').trim();
+    if (!currentText) {
+      return false;
+    }
+
+    return claimAuctionWinner(job, 'foreground', currentText, { messageId: targetMessageId });
+  }
+
+  async function finalizeAuctionWinner(job) {
+    if (!hasAuctionWinner(job)) {
+      return { settled: false, written: false, pending: true };
+    }
+
+    if (job.winnerSource === 'foreground') {
+      return {
+        settled: true,
+        written: true,
+        messageId: normalizeMessageId(job.winnerMessageId),
+        swipeId: Number.isFinite(Number(job.winnerSwipeId)) ? Number(job.winnerSwipeId) : null,
+      };
+    }
+
+    if (job.winnerWriteDone) {
+      return {
+        settled: true,
+        written: true,
+        messageId: normalizeMessageId(job.winnerMessageId),
+        swipeId: Number.isFinite(Number(job.winnerSwipeId)) ? Number(job.winnerSwipeId) : null,
+      };
+    }
+
+    const winnerText = String(job.winnerText || '').trim();
+    if (!winnerText) {
+      return { settled: true, written: false, pending: false };
+    }
+
+    let target = job.writeTarget || null;
+    if (!target) {
+      target = resolveWriteTarget(job);
+      if (target) {
+        job.writeTarget = target;
+      }
+    }
+
+    if (!target) {
+      return { settled: false, written: false, pending: true };
+    }
+
+    setJobPhase(job, JOB_PHASES.writing);
+
+    let writeResult = { appended: false, messageId: null, swipeId: null };
+    const preferredTargetMessageId = target.mode === 'append_assistant'
+      ? normalizeMessageId(target.messageId)
+      : null;
+    const targetMessageId = preferredTargetMessageId ?? normalizeMessageId(job.targetMessageId);
+
+    if (targetMessageId !== null) {
+      writeResult = await appendSwipes(targetMessageId, [winnerText], { activateNewest: true });
+    } else if (target.mode === 'create_after_user') {
+      const created = await createAssistantMessageWithSwipes(job, [winnerText]);
+      writeResult = {
+        appended: Boolean(created?.appended),
+        messageId: normalizeMessageId(created?.messageId),
+        swipeId: created?.appended ? 0 : null,
+      };
+    }
+
+    if (writeResult.messageId !== null) {
+      job.messageId = writeResult.messageId;
+      job.targetMessageId = writeResult.messageId;
+      job.winnerMessageId = writeResult.messageId;
+    }
+    if (writeResult.swipeId !== null) {
+      job.winnerSwipeId = writeResult.swipeId;
+    }
+
+    job.winnerWriteDone = Boolean(writeResult.appended);
+    return {
+      settled: true,
+      written: Boolean(writeResult.appended),
+      messageId: writeResult.messageId,
+      swipeId: writeResult.swipeId,
+      pending: false,
+    };
+  }
+
   async function executeParallelJob(job) {
     const total = Math.max(0, Number(job.extraCount) || 0);
     const progress = job.progress && typeof job.progress === 'object'
@@ -3668,13 +4198,23 @@
             const normalized = String(text || '').trim();
             if (normalized) {
               progress.success += 1;
-              job.bufferedTexts.push(normalized);
-              debug('并发子请求结果入队', {
-                jobId: job.id,
+              const claimed = tryClaimBackgroundAuctionWinner(job, normalized, {
                 index: i + 1,
-                bufferedCount: job.bufferedTexts.length,
-                flushedCount: Number(job.flushedCount) || 0,
               });
+              if (!isAuctionJob(job)) {
+                job.bufferedTexts.push(normalized);
+                debug('并发子请求结果入队', {
+                  jobId: job.id,
+                  index: i + 1,
+                  bufferedCount: job.bufferedTexts.length,
+                  flushedCount: Number(job.flushedCount) || 0,
+                });
+              } else if (claimed) {
+                debug('并发子请求在竞标模式中胜出', {
+                  jobId: job.id,
+                  index: i + 1,
+                });
+              }
               void tryFinalizeJob(job);
             }
             return normalized;
@@ -3748,16 +4288,22 @@
       return;
     }
 
-    if (!job.foregroundEnded && !job.foregroundStopped) {
-      debug('tryFinalizeJob 等待前台结束/停止', { jobId: job.id });
-      setJobPhase(job, JOB_PHASES.waiting_target);
-      return;
+    if (isAuctionJob(job) && !hasAuctionWinner(job)) {
+      tryClaimForegroundAuctionWinner(job);
     }
 
-    if (!job.foregroundValidationDone) {
-      debug('tryFinalizeJob 等待前台最小长度校验完成', { jobId: job.id });
-      setJobPhase(job, JOB_PHASES.waiting_target);
-      return;
+    if (!hasAuctionWinner(job)) {
+      if (!job.foregroundEnded && !job.foregroundStopped) {
+        debug('tryFinalizeJob 等待前台结束/停止', { jobId: job.id });
+        setJobPhase(job, JOB_PHASES.waiting_target);
+        return;
+      }
+
+      if (!job.foregroundValidationDone) {
+        debug('tryFinalizeJob 等待前台最小长度校验完成', { jobId: job.id });
+        setJobPhase(job, JOB_PHASES.waiting_target);
+        return;
+      }
     }
 
     job.finalizing = true;
@@ -3771,6 +4317,44 @@
           terminal: isJobTerminal(job),
           superseded: Boolean(job.superseded),
         });
+        return;
+      }
+
+      if (isAuctionJob(job)) {
+        if (!hasAuctionWinner(job)) {
+          tryClaimForegroundAuctionWinner(job);
+        }
+
+        if (!hasAuctionWinner(job)) {
+          if (job.parallelCompleted) {
+            const successCount = Number(job.progress?.success) || 0;
+            const failedCount = Number(job.progress?.failed) || 0;
+            if (successCount > 0) {
+              warningToast(`竞标模式未写入赢家，保留当前前台回复（成功 ${successCount} / 目标 ${job.extraCount}）`);
+            } else if (failedCount > 0) {
+              warningToast(`竞标模式失败：成功 0 / 目标 ${job.extraCount}`);
+            }
+            setJobPhase(job, JOB_PHASES.done);
+          } else {
+            setJobPhase(job, JOB_PHASES.waiting_target);
+          }
+          return;
+        }
+
+        const auctionResult = await finalizeAuctionWinner(job);
+        if (auctionResult.pending) {
+          setJobPhase(job, JOB_PHASES.waiting_target);
+          return;
+        }
+
+        if (job.winnerSource === 'foreground') {
+          successToast('竞标模式完成：保留前台最快回复');
+        } else if (auctionResult.written) {
+          successToast('竞标模式完成：已切换到最快候选');
+        } else {
+          warningToast('竞标模式已选出赢家，但写入失败，已保留当前楼层');
+        }
+        setJobPhase(job, JOB_PHASES.done);
         return;
       }
 
@@ -3824,7 +4408,9 @@
           let targetMessageId = preferredTargetMessageId ?? normalizeMessageId(job.targetMessageId);
 
           if (targetMessageId !== null) {
-            appended = await appendSwipes(targetMessageId, [nextText]);
+            const appendResult = await appendSwipes(targetMessageId, [nextText]);
+            appended = Boolean(appendResult?.appended);
+            targetMessageId = normalizeMessageId(appendResult?.messageId) ?? targetMessageId;
           } else if (target.mode === 'append_assistant') {
             debug('tryFinalizeJob 跳过写入：append_assistant 目标 message_id 无效', {
               jobId: job.id,
@@ -3971,6 +4557,14 @@
     }
   }
 
+  function onIframeGenerationStarted(generationId) {
+    debug('收到 iframe GENERATION_STARTED', {
+      generationId,
+      activeJob: summarizeJob(activeJob),
+    });
+    rememberForegroundGenerationId(generationId);
+  }
+
   function onChatCompletionSettingsReady(generateData) {
     const generationType = ALLOWED_TYPES.has(lastGenerationType) ? lastGenerationType : 'normal';
     const source = getSourceFromGenerateData(generateData) || getCurrentSource();
@@ -4058,6 +4652,7 @@
         targetMessageIdFromEvent: null,
         generationEndedValue: null,
         bufferedTexts: [],
+        parallelRequestIds: [],
         flushedCount: 0,
         writtenCount: 0,
         writeFailedCount: 0,
@@ -4067,6 +4662,15 @@
         foregroundEnded: false,
         foregroundStopped: false,
         foregroundValidationDone: !shouldValidateForegroundMinReplyTokens(),
+        foregroundValidationPassed: !shouldValidateForegroundMinReplyTokens(),
+        foregroundStopRequested: false,
+        auctionEnabled: isAuctionModeEnabled(),
+        winnerSource: '',
+        winnerText: '',
+        winnerMessageId: null,
+        winnerSwipeId: null,
+        winnerWriteDone: false,
+        auctionSettledAt: 0,
         superseded: false,
         supersededReason: '',
         startedAtGenerationSeq: generationSequence,
@@ -4113,6 +4717,9 @@
     const job = activeJob;
     debug('收到 GENERATION_STOPPED', { activeJob: summarizeJob(job) });
     abortForegroundValidation('收到 GENERATION_STOPPED');
+    if (activeForegroundSession) {
+      activeForegroundSession.awaitingGenerationId = false;
+    }
 
     if (!job) {
       stopStatusBarTracker();
@@ -4123,6 +4730,7 @@
 
     job.foregroundStopped = true;
     job.foregroundValidationDone = true;
+    job.foregroundValidationPassed = false;
     refreshStatusBarForRetryState();
     void tryFinalizeJob(job);
   }
@@ -4131,11 +4739,15 @@
     const job = activeJob;
     debug('收到 GENERATION_ENDED', { messageId, activeJob: summarizeJob(job) });
     const targetMessageId = resolveEndedAssistantMessageId(messageId);
+    if (activeForegroundSession) {
+      activeForegroundSession.awaitingGenerationId = false;
+    }
 
     if (job && !isJobTerminal(job)) {
       job.foregroundEnded = true;
       job.generationEndedValue = messageId;
       job.foregroundValidationDone = !shouldValidateForegroundMinReplyTokens();
+      job.foregroundValidationPassed = !shouldValidateForegroundMinReplyTokens();
 
       if (Number.isFinite(targetMessageId) && targetMessageId >= 0) {
         job.targetMessageIdFromEvent = targetMessageId;
@@ -4150,11 +4762,13 @@
       const validationPromise = runForegroundMinTokenValidation(targetMessageId, job && !isJobTerminal(job) ? job : null);
       if (!validationPromise && job && !isJobTerminal(job)) {
         job.foregroundValidationDone = true;
+        job.foregroundValidationPassed = !shouldValidateForegroundMinReplyTokens();
       }
     } else if (shouldValidateForegroundMinReplyTokens()) {
       debug('前台最小长度校验跳过：未解析到目标楼层', { endedMessageId: messageId });
       if (job && !isJobTerminal(job)) {
         job.foregroundValidationDone = true;
+        job.foregroundValidationPassed = false;
       }
     }
 
@@ -4368,28 +4982,8 @@
       logSwipe('全局流式 handler 已注册');
     }
 
-    function applyEnabledRegexes(text) {
-      if (typeof getTavernRegexes !== 'function') {
-        warnSwipe('getTavernRegexes 不可用，跳过正则处理');
-        return text;
-      }
-
-      try {
-        const regexes = getTavernRegexes({ enable_state: 'enabled' });
-        let result = text;
-        for (const regex of regexes) {
-          try {
-            const pattern = new RegExp(regex.find_regex, 'gm');
-            result = result.replace(pattern, regex.replace_string);
-          } catch (error) {
-            warnSwipe(`正则 "${regex.script_name}" 应用失败:`, error);
-          }
-        }
-        return result;
-      } catch (error) {
-        errorSwipe('正则处理失败:', error);
-        return text;
-      }
+    function applyEnabledRegexes(text, { messageId = null, depth = null } = {}) {
+      return applyTavernAiOutputRegexes(text, { messageId, depth });
     }
 
     async function swipeLeft(messageId, updateUI) {
@@ -4480,7 +5074,7 @@
 
         flushStreamUpdate();
         if (result) {
-          const processedResult = applyEnabledRegexes(result);
+          const processedResult = applyEnabledRegexes(result, { messageId });
           const updatedMsgs = getChatMessages(messageId, { include_swipes: true });
           if (updatedMsgs && updatedMsgs.length > 0) {
             const updatedSwipes = Array.isArray(updatedMsgs[0].swipes) ? [...updatedMsgs[0].swipes] : [];
@@ -6713,6 +7307,10 @@
     bindEvent(tavern_events.GENERATION_STOPPED, onGenerationStopped);
     bindEvent(tavern_events.GENERATION_ENDED, onGenerationEnded);
 
+    if (typeof iframe_events !== 'undefined' && iframe_events.GENERATION_STARTED) {
+      bindEvent(iframe_events.GENERATION_STARTED, onIframeGenerationStarted);
+    }
+
     if (config.old_floor_swipe_enabled) {
       bindOldFloorSwipeEvents();
     }
@@ -6727,6 +7325,10 @@
       'GENERATION_STOPPED',
       'GENERATION_ENDED',
     ];
+
+    if (typeof iframe_events !== 'undefined' && iframe_events.GENERATION_STARTED) {
+      boundEvents.push('IFRAME_GENERATION_STARTED');
+    }
 
     if (config.old_floor_swipe_enabled && typeof iframe_events !== 'undefined' && iframe_events.STREAM_TOKEN_RECEIVED_FULLY) {
       boundEvents.push('STREAM_TOKEN_RECEIVED_FULLY');
@@ -6782,6 +7384,8 @@
       retry_count: getConfiguredRetryCount(),
       retry_delay_ms: getConfiguredRetryDelayMs(),
       min_reply_tokens: getConfiguredMinReplyTokens(),
+      auction_mode_enabled: isAuctionModeEnabled(),
+      silent_mode_enabled: isSilentModeEnabled(),
       parallel_temperatures: getConfiguredParallelTemperatures(),
       status_bar_simple_mode: Boolean(config.status_bar_simple_mode),
       old_floor_swipe_enabled: Boolean(config.old_floor_swipe_enabled),
@@ -6804,6 +7408,8 @@
             foreground_stopped: Boolean(activeJob.foregroundStopped),
             foreground_ended: Boolean(activeJob.foregroundEnded),
             superseded: Boolean(activeJob.superseded),
+            auction_enabled: Boolean(activeJob.auctionEnabled),
+            winner_source: activeJob.winnerSource || null,
             buffered_count: bufferedCount,
             aborted: activeJob.aborted,
           }
@@ -6828,6 +7434,17 @@
     return status();
   }
 
+  function abort(reason = '手动中止当前并发任务') {
+    const job = activeJob;
+    const hadRunningJob = Boolean(job && !isJobTerminal(job));
+    abortActiveJob(reason);
+    refreshStatusBarForRetryState();
+    if (hadRunningJob) {
+      warningToast('已中止当前 Gemini 并发任务');
+    }
+    return status();
+  }
+
   function forcePatchUi() {
     return patchNOpenAiVisibility();
   }
@@ -6837,6 +7454,7 @@
       status,
       enable,
       disable,
+      abort,
       forcePatchUi,
       openSettings: () => openSettingsPopup(),
     };
