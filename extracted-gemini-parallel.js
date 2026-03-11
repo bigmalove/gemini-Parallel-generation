@@ -112,11 +112,13 @@
   let retryStatusKeySeq = 0;
   let activeForegroundSession = null;
   let internalGenerateRequestInFlight = 0;
+  let temporarySuspendSeq = 0;
   const eventStops = [];
   const domCleanups = [];
   const fetchPatchCleanups = [];
   const retryStatusEntries = new Map();
   const navPressFeedbackTimers = new WeakMap();
+  const temporarySuspensions = new Map();
 
   function log(...args) {
     console.log(TAG, ...args);
@@ -603,8 +605,45 @@
     bars.forEach(bar => bar.remove());
   }
 
+  function getTemporarySuspendCount() {
+    return temporarySuspensions.size;
+  }
+
+  function isTemporarilySuspended() {
+    return getTemporarySuspendCount() > 0;
+  }
+
+  function isEffectivelyEnabled() {
+    return Boolean(config.enabled && !isTemporarilySuspended());
+  }
+
+  function buildRuntimeEnabledStateLabel(options = {}) {
+    const persistentEnabled = Object.prototype.hasOwnProperty.call(options, 'persistentEnabled')
+      ? Boolean(options.persistentEnabled)
+      : Boolean(config.enabled);
+    const temporarySuspended = Object.prototype.hasOwnProperty.call(options, 'temporarySuspended')
+      ? Boolean(options.temporarySuspended)
+      : isTemporarilySuspended();
+
+    if (!persistentEnabled && temporarySuspended) {
+      return '已永久禁用（临时挂起中）';
+    }
+    if (!persistentEnabled) {
+      return '已永久禁用';
+    }
+    if (temporarySuspended) {
+      return '已被 DeepThink 临时挂起';
+    }
+    return '已启用';
+  }
+
+  function createTemporarySuspendTicket() {
+    temporarySuspendSeq += 1;
+    return `gps_suspend_${Date.now().toString(36)}_${temporarySuspendSeq.toString(36)}`;
+  }
+
   function buildIdleStatusText() {
-    const enabledState = config.enabled ? '空闲' : '已禁用';
+    const enabledState = buildRuntimeEnabledStateLabel();
     const retryCount = getConfiguredRetryCount();
     const retryDelayMs = getConfiguredRetryDelayMs();
     const minReplyTokens = getConfiguredMinReplyTokens();
@@ -639,7 +678,7 @@
 
   function resolveForegroundDotState(job, foregroundRetryingCount) {
     if (foregroundRetryingCount > 0) return 'retrying';
-    if (!job || job.aborted) return config.enabled ? 'idle' : 'disabled';
+    if (!job || job.aborted) return isEffectivelyEnabled() ? 'idle' : 'disabled';
     if (job.foregroundStopped) return 'failed';
     if (!job.foregroundEnded) return 'running';
     if (!job.foregroundValidationDone) return 'running';
@@ -677,7 +716,7 @@
     if (retryingCount > 0) {
       return createDotStateArray('retrying', retryingCount);
     }
-    if (!config.enabled) {
+    if (!isEffectivelyEnabled()) {
       return ['disabled'];
     }
     return ['idle'];
@@ -865,6 +904,44 @@
       title.style.fontWeight = '700';
       panel.appendChild(title);
 
+      const persistentSwitchRow = hostDocument.createElement('div');
+      persistentSwitchRow.className = SETTINGS_ROW_CLASS;
+      const persistentSwitchLabel = hostDocument.createElement('label');
+      persistentSwitchLabel.textContent = '用户永久开关';
+      persistentSwitchLabel.style.fontWeight = '700';
+      const persistentSwitchCheckbox = hostDocument.createElement('input');
+      persistentSwitchCheckbox.type = 'checkbox';
+      persistentSwitchCheckbox.checked = Boolean(config.enabled);
+      persistentSwitchRow.append(persistentSwitchLabel, persistentSwitchCheckbox);
+      panel.appendChild(persistentSwitchRow);
+
+      const runtimeStatusRow = hostDocument.createElement('div');
+      runtimeStatusRow.className = SETTINGS_ROW_CLASS;
+      const runtimeStatusLabel = hostDocument.createElement('label');
+      runtimeStatusLabel.textContent = '当前运行状态';
+      const runtimeStatusValue = hostDocument.createElement('span');
+      const statusSnapshot = status();
+      runtimeStatusValue.textContent = buildRuntimeEnabledStateLabel({
+        persistentEnabled: statusSnapshot.persistent_enabled,
+        temporarySuspended: statusSnapshot.temporary_suspended,
+      });
+      runtimeStatusValue.style.fontWeight = '700';
+      runtimeStatusValue.style.color = statusSnapshot.temporary_suspended
+        ? 'var(--SmartThemeEmColor, #9ac7ff)'
+        : statusSnapshot.persistent_enabled
+          ? 'var(--SmartThemeBodyColor, #f5f7fa)'
+          : 'var(--SmartThemeQuoteColor, #94a3b8)';
+      runtimeStatusRow.append(runtimeStatusLabel, runtimeStatusValue);
+      panel.appendChild(runtimeStatusRow);
+
+      const runtimeStatusHint = hostDocument.createElement('div');
+      runtimeStatusHint.textContent = statusSnapshot.temporary_suspended
+        ? '临时挂起期间仍可修改永久开关；挂起解除后会按你保存的永久开关生效。'
+        : '永久开关决定默认行为；临时挂起只影响任务运行期间的即时状态。';
+      runtimeStatusHint.style.opacity = '0.82';
+      runtimeStatusHint.style.fontSize = '12px';
+      panel.appendChild(runtimeStatusHint);
+
       const retryRow = hostDocument.createElement('div');
       retryRow.className = SETTINGS_ROW_CLASS;
       const retryLabel = hostDocument.createElement('label');
@@ -1043,6 +1120,7 @@
         return;
       }
       const nextParallelTemperatures = parsedParallelTemperatures.values;
+      const nextPersistentEnabled = Boolean(persistentSwitchCheckbox.checked);
       const nextOldFloorSwipeEnabled = Boolean(swipeCheckbox.checked);
       const nextAuctionModeEnabled = Boolean(auctionCheckbox.checked);
       const nextSilentModeEnabled = Boolean(silentCheckbox.checked);
@@ -1053,6 +1131,7 @@
 
       config = normalizeConfig({
         ...config,
+        enabled: nextPersistentEnabled,
         retry_count: nextRetryCount,
         retry_delay_ms: nextRetryDelayMs,
         min_reply_tokens: nextMinReplyTokens,
@@ -1067,6 +1146,9 @@
       if (!configSaved) {
         errorToast('配置保存失败，已取消重载');
         return;
+      }
+      if (!nextPersistentEnabled) {
+        abortActiveJob('插件已永久禁用');
       }
       refreshStatusBarForRetryState();
 
@@ -2482,7 +2564,7 @@
   }
 
   function shouldInterceptNormalSend() {
-    if (!config.enabled) return false;
+    if (!isEffectivelyEnabled()) return false;
     if (isGroupChat()) return false;
 
     const source = getCurrentSource();
@@ -4509,7 +4591,7 @@
     const source = typeof options.source === 'string' ? options.source : '';
     const desiredN = Number(options.desiredN);
 
-    if (!config.enabled) return false;
+    if (!isEffectivelyEnabled()) return false;
     if (isGroupChat()) return false;
     if (!ALLOWED_TYPES.has(generationType)) return false;
     if (!PARALLEL_SOURCES.has(source)) return false;
@@ -4589,7 +4671,7 @@
 
       if (!shouldArmParallelJob({ generationType, source, desiredN })) {
         if (
-          config.enabled
+          isEffectivelyEnabled()
           && shouldValidateForegroundMinReplyTokens()
           && desiredN === 1
           && generateData
@@ -4610,6 +4692,7 @@
           desiredN,
           allowUiFallback,
           enabled: config.enabled,
+          effectiveEnabled: isEffectivelyEnabled(),
           groupChat: isGroupChat(),
         });
         return;
@@ -7377,9 +7460,16 @@
     const bufferedCount = Array.isArray(activeJob?.bufferedTexts)
       ? activeJob.bufferedTexts.length
       : 0;
+    const persistentEnabled = Boolean(config.enabled);
+    const temporarySuspended = isTemporarilySuspended();
+    const effectiveEnabled = Boolean(persistentEnabled && !temporarySuspended);
 
     return {
-      enabled: config.enabled,
+      enabled: persistentEnabled,
+      persistent_enabled: persistentEnabled,
+      effective_enabled: effectiveEnabled,
+      temporary_suspended: temporarySuspended,
+      temporary_suspend_count: getTemporarySuspendCount(),
       max_parallel_cap: config.max_parallel_cap,
       retry_count: getConfiguredRetryCount(),
       retry_delay_ms: getConfiguredRetryDelayMs(),
@@ -7415,6 +7505,44 @@
           }
         : null,
     };
+  }
+
+  function suspend(reason = '外部任务请求临时挂起 Gemini 并发补全') {
+    const ticket = createTemporarySuspendTicket();
+    temporarySuspensions.set(ticket, {
+      reason: String(reason || '').trim(),
+      createdAt: new Date().toISOString(),
+    });
+
+    const hadRunningJob = Boolean(activeJob && !isJobTerminal(activeJob));
+    if (hadRunningJob) {
+      abortActiveJob(String(reason || '插件已临时挂起'));
+    }
+    refreshStatusBarForRetryState();
+    debug('已登记临时挂起', {
+      ticket,
+      temporarySuspendCount: getTemporarySuspendCount(),
+      persistentEnabled: Boolean(config.enabled),
+    });
+    return {
+      ticket,
+      ...status(),
+    };
+  }
+
+  function resume(ticket) {
+    const normalizedTicket = String(ticket || '').trim();
+    if (!normalizedTicket) {
+      return status();
+    }
+    temporarySuspensions.delete(normalizedTicket);
+    refreshStatusBarForRetryState();
+    debug('已恢复临时挂起', {
+      ticket: normalizedTicket,
+      temporarySuspendCount: getTemporarySuspendCount(),
+      persistentEnabled: Boolean(config.enabled),
+    });
+    return status();
   }
 
   function enable() {
@@ -7454,6 +7582,8 @@
       status,
       enable,
       disable,
+      suspend,
+      resume,
       abort,
       forcePatchUi,
       openSettings: () => openSettingsPopup(),
