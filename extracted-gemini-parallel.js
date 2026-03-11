@@ -24,6 +24,7 @@
   const STATUS_BAR_COLLAPSED_CLASS = 'is-collapsed';
   const STATUS_BAR_WORKING_CLASS = 'is-working';
   const STATUS_BAR_SIMPLE_MODE_CLASS = 'is-simple-mode';
+  const STATUS_BAR_VERTICAL_CLASS = 'is-vertical';
   const STATUS_BAR_NAV_UP_BUTTON_CLASS = 'gemini-parallel-status-nav-up-btn';
   const STATUS_BAR_NAV_DOWN_BUTTON_CLASS = 'gemini-parallel-status-nav-down-btn';
   const STATUS_BAR_NAV_PRESSING_CLASS = 'is-pressing';
@@ -52,6 +53,7 @@
     status_bar_position: null,
     status_bar_collapsed: false,
     status_bar_simple_mode: false,
+    status_bar_vertical: false,
     old_floor_swipe_enabled: true,
     worldbook_switcher_enabled: true,
     worldbook_switcher: {
@@ -73,6 +75,8 @@
   const MAX_RETRY_COUNT = 10;
   const MAX_RETRY_DELAY_MS = 10000;
   const MAX_MIN_REPLY_TOKENS = 4096;
+  const AUCTION_FOREGROUND_SETTLE_GRACE_MS = 800;
+  const AUCTION_FOREGROUND_UNCERTAIN_SETTLE_GRACE_MS = 1400;
   const MIN_TEMPERATURE = 0;
   const MAX_TEMPERATURE = 2;
   const DEFAULT_PARALLEL_TEMPERATURE = 1.0;
@@ -368,6 +372,48 @@
         text-overflow: ellipsis;
       }
 
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS} {
+        flex-direction: column;
+        align-items: stretch;
+        justify-content: center;
+        gap: 6px;
+        width: min(140px, calc(100% - 20px));
+        min-height: auto;
+        padding: 8px;
+        border-radius: 18px;
+        white-space: normal;
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS} .${STATUS_BAR_TOGGLE_BUTTON_CLASS},
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS} .${STATUS_BAR_NAV_UP_BUTTON_CLASS},
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS} .${STATUS_BAR_NAV_DOWN_BUTTON_CLASS} {
+        align-self: center;
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS} .${STATUS_BAR_TEXT_CLASS} {
+        display: block;
+        width: 100%;
+        min-width: 0;
+        text-align: center;
+        white-space: normal;
+        word-break: break-word;
+        line-height: 1.35;
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS} .${STATUS_BAR_DOTS_CLASS} {
+        justify-content: center;
+        flex-wrap: wrap;
+        width: 100%;
+        gap: 5px;
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS} .${STATUS_BAR_SETTINGS_BUTTON_CLASS} {
+        width: 100%;
+        justify-content: center;
+        border-radius: 10px;
+        padding: 4px 10px;
+      }
+
       .${STATUS_BAR_DOTS_CLASS} {
         display: none;
         align-items: center;
@@ -410,6 +456,12 @@
       .${STATUS_BAR_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} {
         gap: 6px;
         padding-right: 8px;
+      }
+
+      .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} {
+        width: auto;
+        min-width: 36px;
+        padding: 6px;
       }
 
       .${STATUS_BAR_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} .${STATUS_BAR_TEXT_CLASS} {
@@ -510,6 +562,15 @@
         color: var(--SmartThemeBodyColor, inherit);
       }
 
+      .${SETTINGS_ROW_CLASS} input[type='checkbox'] {
+        width: 18px;
+        height: 18px;
+        margin: 0;
+        flex: 0 0 auto;
+        accent-color: var(--SmartThemeEmColor, #9ac7ff);
+        cursor: pointer;
+      }
+
       .${SETTINGS_ROW_CLASS} input[type='number'],
       .${SETTINGS_ROW_CLASS} input[type='text'] {
         width: 120px;
@@ -557,6 +618,113 @@
 
       .${SETTINGS_STEPPER_CLASS} > button:hover {
         background: color-mix(in srgb, var(--SmartThemeEmColor, #7eb4ff) 16%, var(--SmartThemeBlurTintColor, rgba(255, 255, 255, 0.08)));
+      }
+
+      @media (max-width: 768px), (pointer: coarse) {
+        .${STATUS_BAR_CLASS} {
+          gap: 10px;
+          min-height: 40px;
+          max-width: calc(100vw - 16px);
+          padding: 8px 14px;
+          font-size: 14px;
+        }
+
+        .${STATUS_BAR_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} {
+          min-width: 42px;
+          min-height: 42px;
+          padding: 6px;
+          gap: 6px;
+        }
+
+        .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS} {
+          width: min(180px, calc(100vw - 16px));
+          gap: 8px;
+          padding: 10px;
+        }
+
+        .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} {
+          min-width: 48px;
+          min-height: 48px;
+          padding: 8px;
+        }
+
+        .${STATUS_BAR_TOGGLE_BUTTON_CLASS},
+        .${STATUS_BAR_NAV_UP_BUTTON_CLASS},
+        .${STATUS_BAR_NAV_DOWN_BUTTON_CLASS} {
+          width: 38px;
+          min-width: 38px;
+          height: 38px;
+          font-size: 15px;
+        }
+
+        .${STATUS_BAR_SETTINGS_BUTTON_CLASS} {
+          min-height: 38px;
+          padding: 6px 14px;
+          font-size: 13px;
+        }
+
+        .${STATUS_BAR_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} .${STATUS_BAR_SETTINGS_BUTTON_CLASS} {
+          width: 38px;
+          min-width: 38px;
+          height: 38px;
+          padding: 0;
+          font-size: 15px;
+        }
+
+        .${STATUS_BAR_DOTS_CLASS} {
+          gap: 8px;
+        }
+
+        .${STATUS_BAR_DOT_CLASS} {
+          width: 10px;
+          height: 10px;
+        }
+
+        .${SETTINGS_PANEL_CLASS} {
+          min-width: min(92vw, 360px);
+          gap: 12px;
+        }
+
+        .${SETTINGS_ROW_CLASS} {
+          align-items: flex-start;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+
+        .${SETTINGS_ROW_CLASS} > label {
+          flex: 1 1 calc(100% - 32px);
+          min-width: 0;
+          font-size: 14px;
+          line-height: 1.4;
+        }
+
+        .${SETTINGS_ROW_CLASS} input[type='checkbox'] {
+          width: 24px;
+          height: 24px;
+        }
+
+        .${SETTINGS_ROW_CLASS} input[type='number'],
+        .${SETTINGS_ROW_CLASS} input[type='text'] {
+          width: 100%;
+          min-height: 40px;
+          font-size: 16px;
+        }
+
+        .${SETTINGS_STEPPER_CLASS} {
+          gap: 10px;
+        }
+
+        .${SETTINGS_STEPPER_CLASS} > button {
+          min-width: 40px;
+          height: 40px;
+          font-size: 18px;
+        }
+
+        .${SETTINGS_STEPPER_CLASS} > span {
+          min-width: 36px;
+          font-size: 16px;
+          line-height: 40px;
+        }
       }
     `;
 
@@ -652,6 +820,10 @@
 
   function isStatusBarSimpleMode() {
     return Boolean(config?.status_bar_simple_mode);
+  }
+
+  function isStatusBarVertical() {
+    return Boolean(config?.status_bar_vertical);
   }
 
   function createDotStateArray(state, count) {
@@ -1082,6 +1254,16 @@
       statusBarSimpleRow.append(statusBarSimpleLabel, statusBarSimpleCheckbox);
       panel.appendChild(statusBarSimpleRow);
 
+      const statusBarVerticalRow = hostDocument.createElement('div');
+      statusBarVerticalRow.className = SETTINGS_ROW_CLASS;
+      const statusBarVerticalLabel = hostDocument.createElement('label');
+      statusBarVerticalLabel.textContent = '状态栏竖版模式（侧边堆叠）';
+      const statusBarVerticalCheckbox = hostDocument.createElement('input');
+      statusBarVerticalCheckbox.type = 'checkbox';
+      statusBarVerticalCheckbox.checked = isStatusBarVertical();
+      statusBarVerticalRow.append(statusBarVerticalLabel, statusBarVerticalCheckbox);
+      panel.appendChild(statusBarVerticalRow);
+
       const adjustRetryValue = (delta) => {
         const current = clampRetryCount(Number(retryValue.textContent) || 0);
         const next = clampRetryCount(current + delta);
@@ -1126,6 +1308,7 @@
       const nextSilentModeEnabled = Boolean(silentCheckbox.checked);
       const nextWorldbookSwitcherEnabled = Boolean(wbCheckbox.checked);
       const nextStatusBarSimpleMode = Boolean(statusBarSimpleCheckbox.checked);
+      const nextStatusBarVertical = Boolean(statusBarVerticalCheckbox.checked);
       const moduleSwitchChanged = nextOldFloorSwipeEnabled !== Boolean(config.old_floor_swipe_enabled)
         || nextWorldbookSwitcherEnabled !== Boolean(config.worldbook_switcher_enabled);
 
@@ -1139,6 +1322,7 @@
         silent_mode_enabled: nextSilentModeEnabled,
         parallel_temperatures: nextParallelTemperatures,
         status_bar_simple_mode: nextStatusBarSimpleMode,
+        status_bar_vertical: nextStatusBarVertical,
         old_floor_swipe_enabled: nextOldFloorSwipeEnabled,
         worldbook_switcher_enabled: nextWorldbookSwitcherEnabled,
       });
@@ -1290,6 +1474,30 @@
     const top = Number(position.top);
     if (!Number.isFinite(left) || !Number.isFinite(top)) return null;
     return { left: Math.round(left), top: Math.round(top) };
+  }
+
+  function normalizeStatusBarPositionStore(position) {
+    const legacyPoint = normalizeStatusBarPosition(position);
+    if (legacyPoint) {
+      return {
+        horizontal: legacyPoint,
+        vertical: null,
+      };
+    }
+    const raw = position && typeof position === 'object' ? position : {};
+    return {
+      horizontal: normalizeStatusBarPosition(raw.horizontal),
+      vertical: normalizeStatusBarPosition(raw.vertical),
+    };
+  }
+
+  function getStatusBarLayoutKey() {
+    return isStatusBarVertical() ? 'vertical' : 'horizontal';
+  }
+
+  function getSavedStatusBarPosition(layoutKey = getStatusBarLayoutKey()) {
+    const store = normalizeStatusBarPositionStore(config?.status_bar_position);
+    return normalizeStatusBarPosition(store?.[layoutKey]);
   }
 
   function isDomElement(node) {
@@ -1589,14 +1797,31 @@
     const rect = bar.getBoundingClientRect();
     const chat = getChatContainer();
     const gap = 8;
+    const vertical = isStatusBarVertical();
 
     if (chat && typeof chat.getBoundingClientRect === 'function') {
       const chatRect = chat.getBoundingClientRect();
+      if (vertical) {
+        const preferredLeft = chatRect.right + gap;
+        const left = preferredLeft + rect.width <= hostWindow.innerWidth
+          ? preferredLeft
+          : (chatRect.right - rect.width - 6);
+        const top = chatRect.top + (chatRect.height - rect.height) / 2;
+        setStatusBarPosition(bar, left, top);
+        return;
+      }
       const left = chatRect.left + (chatRect.width - rect.width) / 2;
       const topBelow = chatRect.bottom + gap;
       const hasSpaceBelow = topBelow + rect.height <= hostWindow.innerHeight;
       const top = hasSpaceBelow ? topBelow : (chatRect.bottom - rect.height - 6);
       setStatusBarPosition(bar, left, top);
+      return;
+    }
+
+    if (vertical) {
+      const fallbackLeft = hostWindow.innerWidth - rect.width - 6;
+      const fallbackTop = (hostWindow.innerHeight - rect.height) / 2;
+      setStatusBarPosition(bar, fallbackLeft, fallbackTop);
       return;
     }
 
@@ -1622,9 +1847,14 @@
     bar.style.transform = 'none';
 
     if (options.persist) {
+      const layoutKey = getStatusBarLayoutKey();
+      const nextPositionStore = {
+        ...normalizeStatusBarPositionStore(config?.status_bar_position),
+        [layoutKey]: { left: clampedLeft, top: clampedTop },
+      };
       config = normalizeConfig({
         ...config,
-        status_bar_position: { left: clampedLeft, top: clampedTop },
+        status_bar_position: nextPositionStore,
       });
       saveConfig();
     }
@@ -1632,25 +1862,29 @@
   }
 
   function applySavedStatusBarPosition(bar) {
-    const saved = normalizeStatusBarPosition(config?.status_bar_position);
+    const saved = getSavedStatusBarPosition();
     if (!saved) {
-      applyDefaultStatusBarPosition(bar);
-      return;
+      return false;
     }
 
     const next = setStatusBarPosition(bar, saved.left, saved.top);
     if (!next) {
-      applyDefaultStatusBarPosition(bar);
-      return;
+      return false;
     }
 
     if (next.left !== saved.left || next.top !== saved.top) {
+      const layoutKey = getStatusBarLayoutKey();
+      const nextPositionStore = {
+        ...normalizeStatusBarPositionStore(config?.status_bar_position),
+        [layoutKey]: next,
+      };
       config = normalizeConfig({
         ...config,
-        status_bar_position: next,
+        status_bar_position: nextPositionStore,
       });
       saveConfig();
     }
+    return true;
   }
 
   function onStatusBarPointerDown(event) {
@@ -1753,7 +1987,6 @@
     }
 
     let bar = bars[0] || null;
-    const isNewBar = !bar;
     if (!bar) {
       bar = hostDocument.createElement('div');
       bar.className = STATUS_BAR_CLASS;
@@ -1853,9 +2086,6 @@
     if (bar.parentElement !== body) {
       body.appendChild(bar);
     }
-    if (isNewBar) {
-      applySavedStatusBarPosition(bar);
-    }
     return bar;
   }
 
@@ -1876,7 +2106,9 @@
     const textNode = bar.querySelector(`.${STATUS_BAR_TEXT_CLASS}`) || bar;
     const settingsButton = bar.querySelector(`.${STATUS_BAR_SETTINGS_BUTTON_CLASS}`);
     const simpleMode = isStatusBarSimpleMode();
+    const verticalMode = isStatusBarVertical();
     bar.classList.toggle(STATUS_BAR_SIMPLE_MODE_CLASS, simpleMode);
+    bar.classList.toggle(STATUS_BAR_VERTICAL_CLASS, verticalMode);
     const isCollapsed = isStatusBarCollapsed();
     const isWorking = isStatusBarWorking(options.job);
     bar.classList.toggle(STATUS_BAR_WORKING_CLASS, isWorking);
@@ -1913,8 +2145,11 @@
       dotsNode,
       buildStatusDotStates(options.progress, options.job),
     );
-    if (!statusBarDragState && !normalizeStatusBarPosition(config?.status_bar_position)) {
-      applyDefaultStatusBarPosition(bar);
+    if (!statusBarDragState) {
+      const appliedSavedPosition = applySavedStatusBarPosition(bar);
+      if (!appliedSavedPosition) {
+        applyDefaultStatusBarPosition(bar);
+      }
     }
     return true;
   }
@@ -2360,9 +2595,10 @@
         DEFAULT_CONFIG.silent_mode_enabled,
       ),
       parallel_temperatures: normalizeParallelTemperatures(raw.parallel_temperatures ?? DEFAULT_CONFIG.parallel_temperatures),
-      status_bar_position: normalizeStatusBarPosition(raw.status_bar_position ?? DEFAULT_CONFIG.status_bar_position),
+      status_bar_position: normalizeStatusBarPositionStore(raw.status_bar_position ?? DEFAULT_CONFIG.status_bar_position),
       status_bar_collapsed: normalizeBooleanFlag(raw.status_bar_collapsed, DEFAULT_CONFIG.status_bar_collapsed),
       status_bar_simple_mode: normalizeBooleanFlag(raw.status_bar_simple_mode, DEFAULT_CONFIG.status_bar_simple_mode),
+      status_bar_vertical: normalizeBooleanFlag(raw.status_bar_vertical, DEFAULT_CONFIG.status_bar_vertical),
       old_floor_swipe_enabled: normalizeBooleanFlag(raw.old_floor_swipe_enabled, DEFAULT_CONFIG.old_floor_swipe_enabled),
       worldbook_switcher_enabled: normalizeBooleanFlag(
         raw.worldbook_switcher_enabled,
@@ -3702,6 +3938,65 @@
     return Boolean(job?.auctionEnabled);
   }
 
+  function clearAuctionFinalizeRetry(job) {
+    if (!job) return;
+    if (job.auctionFinalizeRetryTimer) {
+      clearTimeout(job.auctionFinalizeRetryTimer);
+    }
+    job.auctionFinalizeRetryTimer = null;
+    job.auctionFinalizeRetryAt = 0;
+  }
+
+  function scheduleAuctionFinalizeRetry(job, delayMs) {
+    if (!job || isJobTerminal(job) || job.superseded) {
+      return;
+    }
+
+    const nextDelay = Math.max(60, Math.ceil(Number(delayMs) || 0));
+    const nextAt = Date.now() + nextDelay;
+    if (
+      job.auctionFinalizeRetryTimer
+      && Number.isFinite(Number(job.auctionFinalizeRetryAt))
+      && Math.abs(Number(job.auctionFinalizeRetryAt) - nextAt) <= 24
+    ) {
+      return;
+    }
+
+    clearAuctionFinalizeRetry(job);
+    job.auctionFinalizeRetryAt = nextAt;
+    job.auctionFinalizeRetryTimer = setTimeout(() => {
+      clearAuctionFinalizeRetry(job);
+      if (!activeJob || activeJob.id !== job.id || isJobTerminal(job) || job.superseded) {
+        return;
+      }
+      void tryFinalizeJob(job);
+    }, nextDelay);
+  }
+
+  function getAuctionForegroundSettleGraceMs(job) {
+    return job?.foregroundStopRequested
+      ? AUCTION_FOREGROUND_SETTLE_GRACE_MS
+      : AUCTION_FOREGROUND_UNCERTAIN_SETTLE_GRACE_MS;
+  }
+
+  function getAuctionForegroundSettleWaitMs(job, target) {
+    if (!isAuctionJob(job) || job?.winnerSource !== 'background') {
+      return 0;
+    }
+    if (!target || target.mode !== 'create_after_user') {
+      return 0;
+    }
+
+    const settledAt = Number(job.auctionSettledAt) || 0;
+    if (settledAt <= 0) {
+      return 0;
+    }
+
+    const graceMs = getAuctionForegroundSettleGraceMs(job);
+    const elapsedMs = Date.now() - settledAt;
+    return Math.max(0, graceMs - elapsedMs);
+  }
+
   function rememberForegroundGenerationId(generationId) {
     const job = activeJob;
     const session = activeForegroundSession;
@@ -4213,6 +4508,24 @@
       return { settled: false, written: false, pending: true };
     }
 
+    const settleWaitMs = getAuctionForegroundSettleWaitMs(job, target);
+    if (settleWaitMs > 0) {
+      debug('竞标模式等待前台楼层结算，暂缓创建新楼层', {
+        jobId: job.id,
+        waitMs: settleWaitMs,
+        target,
+        foregroundEnded: Boolean(job.foregroundEnded),
+        foregroundStopped: Boolean(job.foregroundStopped),
+        foregroundStopRequested: Boolean(job.foregroundStopRequested),
+      });
+      return {
+        settled: false,
+        written: false,
+        pending: true,
+        retryAfterMs: settleWaitMs,
+      };
+    }
+
     setJobPhase(job, JOB_PHASES.writing);
 
     let writeResult = { appended: false, messageId: null, swipeId: null };
@@ -4425,10 +4738,14 @@
 
         const auctionResult = await finalizeAuctionWinner(job);
         if (auctionResult.pending) {
+          if (Number.isFinite(Number(auctionResult.retryAfterMs)) && Number(auctionResult.retryAfterMs) > 0) {
+            scheduleAuctionFinalizeRetry(job, Number(auctionResult.retryAfterMs));
+          }
           setJobPhase(job, JOB_PHASES.waiting_target);
           return;
         }
 
+        clearAuctionFinalizeRetry(job);
         if (job.winnerSource === 'foreground') {
           successToast('竞标模式完成：保留前台最快回复');
         } else if (auctionResult.written) {
@@ -4577,6 +4894,7 @@
   function clearActiveJobIfMatch(job) {
     if (activeJob && job && activeJob.id === job.id) {
       debug('清理 activeJob', { job: summarizeJob(job) });
+      clearAuctionFinalizeRetry(job);
       stopStatusBarTracker();
       removeJobStatusBar(job);
       activeJob = null;
@@ -4754,6 +5072,8 @@
         winnerSwipeId: null,
         winnerWriteDone: false,
         auctionSettledAt: 0,
+        auctionFinalizeRetryTimer: null,
+        auctionFinalizeRetryAt: 0,
         superseded: false,
         supersededReason: '',
         startedAtGenerationSeq: generationSequence,
@@ -7478,6 +7798,7 @@
       silent_mode_enabled: isSilentModeEnabled(),
       parallel_temperatures: getConfiguredParallelTemperatures(),
       status_bar_simple_mode: Boolean(config.status_bar_simple_mode),
+      status_bar_vertical: Boolean(config.status_bar_vertical),
       old_floor_swipe_enabled: Boolean(config.old_floor_swipe_enabled),
       worldbook_switcher_enabled: Boolean(config.worldbook_switcher_enabled),
       current_source: source,
