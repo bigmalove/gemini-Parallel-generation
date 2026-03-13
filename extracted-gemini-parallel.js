@@ -30,8 +30,15 @@
   const STATUS_BAR_NAV_PRESSING_CLASS = 'is-pressing';
   const SETTINGS_PANEL_CLASS = 'gemini-parallel-settings-panel';
   const SETTINGS_ROW_CLASS = 'gemini-parallel-settings-row';
+  const SETTINGS_CHECKBOX_ROW_CLASS = 'gemini-parallel-settings-row-checkbox';
   const SETTINGS_STEPPER_CLASS = 'gemini-parallel-settings-stepper';
   const DEBUG_FLAG_KEY = '__GeminiParallelSwipeDebug';
+  const DEFAULT_STATUS_BAR_OPACITY_PERCENT = 100;
+  const MIN_STATUS_BAR_OPACITY_PERCENT = 30;
+  const MAX_STATUS_BAR_OPACITY_PERCENT = 100;
+  const DEFAULT_STATUS_BAR_SCALE_PERCENT = 100;
+  const MIN_STATUS_BAR_SCALE_PERCENT = 80;
+  const MAX_STATUS_BAR_SCALE_PERCENT = 180;
   const JOB_PHASES = Object.freeze({
     armed: 'armed',
     prefetching: 'prefetching',
@@ -54,6 +61,8 @@
     status_bar_collapsed: false,
     status_bar_simple_mode: false,
     status_bar_vertical: false,
+    status_bar_opacity_percent: DEFAULT_STATUS_BAR_OPACITY_PERCENT,
+    status_bar_scale_percent: DEFAULT_STATUS_BAR_SCALE_PERCENT,
     old_floor_swipe_enabled: true,
     worldbook_switcher_enabled: true,
     worldbook_switcher: {
@@ -237,40 +246,53 @@
     return getHostDocument().querySelector('#chat');
   }
 
+  function formatCssNumber(value, digits = 2) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return '0';
+    return num.toFixed(digits).replace(/\.?0+$/, '');
+  }
+
+  function formatScaledPx(value, scale, digits = 2) {
+    return `${formatCssNumber(Number(value) * Number(scale), digits)}px`;
+  }
+
   function ensureStatusBarStyle() {
     const hostDocument = getHostDocument();
     if (!hostDocument) return false;
+    const statusBarOpacity = getConfiguredStatusBarOpacityPercent() / 100;
+    const statusBarScale = getConfiguredStatusBarScalePercent() / 100;
+    const px = (value, digits = 2) => formatScaledPx(value, statusBarScale, digits);
     const cssText = `
       .${STATUS_BAR_CLASS} {
         position: fixed;
         left: 50%;
-        bottom: 6px;
+        bottom: ${px(6)};
         transform: translateX(-50%);
         display: inline-flex;
         align-items: center;
         justify-content: space-between;
-        gap: 8px;
+        gap: ${px(8)};
         width: max-content;
-        max-width: calc(100% - 20px);
+        max-width: calc(100% - ${px(20)});
         margin: 0;
-        min-height: 28px;
-        padding: 3px 12px;
+        min-height: ${px(28)};
+        padding: ${px(3)} ${px(12)};
         border-radius: 999px;
         background: rgba(18, 20, 26, 0.88);
         border: 1px solid rgba(255, 255, 255, 0.24);
         color: #f5f7fa;
-        font-size: 12px;
+        font-size: ${px(12)};
         font-weight: 600;
         line-height: 1.2;
-        letter-spacing: 0.2px;
+        letter-spacing: ${px(0.2)};
         text-shadow: none;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
         pointer-events: auto;
-        opacity: 1;
-        backdrop-filter: blur(2px);
-        box-shadow: 0 1px 8px rgba(0, 0, 0, 0.35);
+        opacity: ${formatCssNumber(statusBarOpacity)};
+        backdrop-filter: blur(${px(2)});
+        box-shadow: 0 ${px(1)} ${px(8)} rgba(0, 0, 0, 0.35);
         z-index: 2147483646;
         touch-action: none;
         user-select: none;
@@ -283,10 +305,10 @@
 
       .${STATUS_BAR_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} {
         min-width: max-content;
-        max-width: calc(100% - 20px);
+        max-width: calc(100% - ${px(20)});
         width: auto;
-        padding: 3px 6px;
-        gap: 4px;
+        padding: ${px(3)} ${px(6)};
+        gap: ${px(4)};
         justify-content: center;
       }
 
@@ -308,7 +330,7 @@
       .${STATUS_BAR_CLASS}.${STATUS_BAR_WORKING_CLASS}.${STATUS_BAR_COLLAPSED_CLASS}
       .${STATUS_BAR_TOGGLE_BUTTON_CLASS} .gemini-parallel-status-spinner {
         display: inline-block;
-        font-size: 13px;
+        font-size: ${px(13)};
         line-height: 1;
         color: rgba(201, 236, 255, 0.96);
         transform-origin: 50% 50%;
@@ -346,13 +368,13 @@
 
       .${STATUS_BAR_TOGGLE_BUTTON_CLASS} {
         flex: 0 0 auto;
-        width: 22px;
-        min-width: 22px;
-        height: 22px;
+        width: ${px(22)};
+        min-width: ${px(22)};
+        height: ${px(22)};
         border: 1px solid rgba(255, 255, 255, 0.28);
         background: rgba(255, 255, 255, 0.08);
         color: #f5f7fa;
-        font-size: 12px;
+        font-size: ${px(12)};
         font-weight: 700;
         border-radius: 999px;
         display: inline-flex;
@@ -376,11 +398,11 @@
         flex-direction: column;
         align-items: stretch;
         justify-content: center;
-        gap: 6px;
-        width: min(140px, calc(100% - 20px));
+        gap: ${px(6)};
+        width: min(${px(140)}, calc(100% - ${px(20)}));
         min-height: auto;
-        padding: 8px;
-        border-radius: 18px;
+        padding: ${px(8)};
+        border-radius: ${px(18)};
         white-space: normal;
       }
 
@@ -404,26 +426,26 @@
         justify-content: center;
         flex-wrap: wrap;
         width: 100%;
-        gap: 5px;
+        gap: ${px(5)};
       }
 
       .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS} .${STATUS_BAR_SETTINGS_BUTTON_CLASS} {
         width: 100%;
         justify-content: center;
-        border-radius: 10px;
-        padding: 4px 10px;
+        border-radius: ${px(10)};
+        padding: ${px(4)} ${px(10)};
       }
 
       .${STATUS_BAR_DOTS_CLASS} {
         display: none;
         align-items: center;
-        gap: 6px;
-        min-height: 10px;
+        gap: ${px(6)};
+        min-height: ${px(10)};
       }
 
       .${STATUS_BAR_DOT_CLASS} {
-        width: 8px;
-        height: 8px;
+        width: ${px(8)};
+        height: ${px(8)};
         border-radius: 999px;
         background: #64748b;
         box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18);
@@ -454,14 +476,14 @@
       }
 
       .${STATUS_BAR_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} {
-        gap: 6px;
-        padding-right: 8px;
+        gap: ${px(6)};
+        padding-right: ${px(8)};
       }
 
       .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} {
         width: auto;
-        min-width: 36px;
-        padding: 6px;
+        min-width: ${px(36)};
+        padding: ${px(6)};
       }
 
       .${STATUS_BAR_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} .${STATUS_BAR_TEXT_CLASS} {
@@ -477,11 +499,11 @@
         border: 1px solid rgba(255, 255, 255, 0.28);
         background: rgba(255, 255, 255, 0.08);
         color: #f5f7fa;
-        font-size: 11px;
+        font-size: ${px(11)};
         font-weight: 600;
         border-radius: 999px;
-        padding: 2px 10px;
-        min-height: 22px;
+        padding: ${px(2)} ${px(10)};
+        min-height: ${px(22)};
         display: inline-flex;
         align-items: center;
         line-height: 1.3;
@@ -489,11 +511,11 @@
       }
 
       .${STATUS_BAR_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} .${STATUS_BAR_SETTINGS_BUTTON_CLASS} {
-        width: 22px;
-        min-width: 22px;
+        width: ${px(22)};
+        min-width: ${px(22)};
         padding: 0;
         justify-content: center;
-        font-size: 12px;
+        font-size: ${px(12)};
       }
 
       .${STATUS_BAR_SETTINGS_BUTTON_CLASS}:hover {
@@ -503,13 +525,13 @@
       .${STATUS_BAR_NAV_UP_BUTTON_CLASS},
       .${STATUS_BAR_NAV_DOWN_BUTTON_CLASS} {
         flex: 0 0 auto;
-        width: 22px;
-        min-width: 22px;
-        height: 22px;
+        width: ${px(22)};
+        min-width: ${px(22)};
+        height: ${px(22)};
         border: 1px solid rgba(255, 255, 255, 0.28);
         background: rgba(255, 255, 255, 0.08);
         color: #f5f7fa;
-        font-size: 10px;
+        font-size: ${px(10)};
         font-weight: 700;
         border-radius: 999px;
         display: inline-flex;
@@ -547,6 +569,8 @@
         flex-direction: column;
         gap: 10px;
         min-width: 280px;
+        max-width: min(100%, 560px);
+        box-sizing: border-box;
         color: var(--SmartThemeBodyColor, inherit);
       }
 
@@ -555,6 +579,10 @@
         align-items: center;
         justify-content: space-between;
         gap: 10px;
+      }
+
+      .${SETTINGS_ROW_CLASS}.${SETTINGS_CHECKBOX_ROW_CLASS} {
+        align-items: flex-start;
       }
 
       .${SETTINGS_ROW_CLASS} > label {
@@ -622,96 +650,135 @@
 
       @media (max-width: 768px), (pointer: coarse) {
         .${STATUS_BAR_CLASS} {
-          gap: 10px;
-          min-height: 40px;
-          max-width: calc(100vw - 16px);
-          padding: 8px 14px;
-          font-size: 14px;
+          gap: ${px(10)};
+          min-height: ${px(40)};
+          max-width: calc(100vw - ${px(16)});
+          padding: ${px(8)} ${px(14)};
+          font-size: ${px(14)};
         }
 
         .${STATUS_BAR_CLASS}.${STATUS_BAR_COLLAPSED_CLASS} {
-          min-width: 42px;
-          min-height: 42px;
-          padding: 6px;
-          gap: 6px;
+          min-width: ${px(42)};
+          min-height: ${px(42)};
+          padding: ${px(6)};
+          gap: ${px(6)};
         }
 
         .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS} {
-          width: min(180px, calc(100vw - 16px));
-          gap: 8px;
-          padding: 10px;
+          width: min(${px(180)}, calc(100vw - ${px(16)}));
+          gap: ${px(8)};
+          padding: ${px(10)};
         }
 
         .${STATUS_BAR_CLASS}.${STATUS_BAR_VERTICAL_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} {
-          min-width: 48px;
-          min-height: 48px;
-          padding: 8px;
+          min-width: ${px(48)};
+          min-height: ${px(48)};
+          padding: ${px(8)};
         }
 
         .${STATUS_BAR_TOGGLE_BUTTON_CLASS},
         .${STATUS_BAR_NAV_UP_BUTTON_CLASS},
         .${STATUS_BAR_NAV_DOWN_BUTTON_CLASS} {
-          width: 38px;
-          min-width: 38px;
-          height: 38px;
-          font-size: 15px;
+          width: ${px(38)};
+          min-width: ${px(38)};
+          height: ${px(38)};
+          font-size: ${px(15)};
         }
 
         .${STATUS_BAR_SETTINGS_BUTTON_CLASS} {
-          min-height: 38px;
-          padding: 6px 14px;
-          font-size: 13px;
+          min-height: ${px(38)};
+          padding: ${px(6)} ${px(14)};
+          font-size: ${px(13)};
         }
 
         .${STATUS_BAR_CLASS}.${STATUS_BAR_SIMPLE_MODE_CLASS} .${STATUS_BAR_SETTINGS_BUTTON_CLASS} {
-          width: 38px;
-          min-width: 38px;
-          height: 38px;
+          width: ${px(38)};
+          min-width: ${px(38)};
+          height: ${px(38)};
           padding: 0;
-          font-size: 15px;
+          font-size: ${px(15)};
         }
 
         .${STATUS_BAR_DOTS_CLASS} {
-          gap: 8px;
+          gap: ${px(8)};
         }
 
         .${STATUS_BAR_DOT_CLASS} {
-          width: 10px;
-          height: 10px;
+          width: ${px(10)};
+          height: ${px(10)};
         }
 
         .${SETTINGS_PANEL_CLASS} {
-          min-width: min(92vw, 360px);
+          width: min(92vw, 360px);
+          min-width: 0;
+          max-width: calc(100vw - 16px);
           gap: 12px;
         }
 
         .${SETTINGS_ROW_CLASS} {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
           align-items: flex-start;
-          flex-wrap: wrap;
-          gap: 8px;
+          width: 100%;
+          gap: 8px 10px;
         }
 
         .${SETTINGS_ROW_CLASS} > label {
-          flex: 1 1 calc(100% - 32px);
+          grid-column: 1;
           min-width: 0;
           font-size: 14px;
           line-height: 1.4;
+          overflow-wrap: anywhere;
         }
 
         .${SETTINGS_ROW_CLASS} input[type='checkbox'] {
+          grid-column: 2;
+          justify-self: end;
+          align-self: center;
           width: 24px;
           height: 24px;
+          margin-top: 2px;
+        }
+
+        .${SETTINGS_ROW_CLASS} > span,
+        .${SETTINGS_ROW_CLASS} > .${SETTINGS_STEPPER_CLASS},
+        .${SETTINGS_ROW_CLASS} input[type='number'],
+        .${SETTINGS_ROW_CLASS} input[type='text'] {
+          grid-column: 1 / -1;
+          width: 100%;
+          min-width: 0;
+        }
+
+        .${SETTINGS_ROW_CLASS}.${SETTINGS_CHECKBOX_ROW_CLASS} {
+          display: flex;
+          align-items: flex-start;
+          justify-content: flex-start;
+          gap: 12px;
+        }
+
+        .${SETTINGS_ROW_CLASS}.${SETTINGS_CHECKBOX_ROW_CLASS} > label {
+          order: 2;
+          flex: 1 1 auto;
+        }
+
+        .${SETTINGS_ROW_CLASS}.${SETTINGS_CHECKBOX_ROW_CLASS} input[type='checkbox'] {
+          order: 1;
+          grid-column: auto;
+          justify-self: auto;
+          align-self: flex-start;
+          margin: 2px 0 0 2px;
+        }
+
+        .${SETTINGS_STEPPER_CLASS} {
+          width: 100%;
+          justify-content: flex-start;
+          gap: 10px;
         }
 
         .${SETTINGS_ROW_CLASS} input[type='number'],
         .${SETTINGS_ROW_CLASS} input[type='text'] {
-          width: 100%;
           min-height: 40px;
           font-size: 16px;
-        }
-
-        .${SETTINGS_STEPPER_CLASS} {
-          gap: 10px;
         }
 
         .${SETTINGS_STEPPER_CLASS} > button {
@@ -1077,7 +1144,7 @@
       panel.appendChild(title);
 
       const persistentSwitchRow = hostDocument.createElement('div');
-      persistentSwitchRow.className = SETTINGS_ROW_CLASS;
+      persistentSwitchRow.className = `${SETTINGS_ROW_CLASS} ${SETTINGS_CHECKBOX_ROW_CLASS}`;
       const persistentSwitchLabel = hostDocument.createElement('label');
       persistentSwitchLabel.textContent = '用户永久开关';
       persistentSwitchLabel.style.fontWeight = '700';
@@ -1201,7 +1268,7 @@
       panel.appendChild(moduleTitle);
 
       const swipeRow = hostDocument.createElement('div');
-      swipeRow.className = SETTINGS_ROW_CLASS;
+      swipeRow.className = `${SETTINGS_ROW_CLASS} ${SETTINGS_CHECKBOX_ROW_CLASS}`;
       const swipeLabel = hostDocument.createElement('label');
       swipeLabel.textContent = '旧楼层 Swipe';
       const swipeCheckbox = hostDocument.createElement('input');
@@ -1211,7 +1278,7 @@
       panel.appendChild(swipeRow);
 
       const auctionRow = hostDocument.createElement('div');
-      auctionRow.className = SETTINGS_ROW_CLASS;
+      auctionRow.className = `${SETTINGS_ROW_CLASS} ${SETTINGS_CHECKBOX_ROW_CLASS}`;
       const auctionLabel = hostDocument.createElement('label');
       auctionLabel.textContent = '竞标模式（有一个完成就停）';
       auctionLabel.style.fontWeight = '700';
@@ -1223,7 +1290,7 @@
       panel.appendChild(auctionRow);
 
       const silentRow = hostDocument.createElement('div');
-      silentRow.className = SETTINGS_ROW_CLASS;
+      silentRow.className = `${SETTINGS_ROW_CLASS} ${SETTINGS_CHECKBOX_ROW_CLASS}`;
       const silentLabel = hostDocument.createElement('label');
       silentLabel.textContent = '静默模式（不弹提示）';
       silentLabel.style.fontWeight = '700';
@@ -1235,7 +1302,7 @@
       panel.appendChild(silentRow);
 
       const wbRow = hostDocument.createElement('div');
-      wbRow.className = SETTINGS_ROW_CLASS;
+      wbRow.className = `${SETTINGS_ROW_CLASS} ${SETTINGS_CHECKBOX_ROW_CLASS}`;
       const wbLabel = hostDocument.createElement('label');
       wbLabel.textContent = '世界书快捷切换';
       const wbCheckbox = hostDocument.createElement('input');
@@ -1244,8 +1311,34 @@
       wbRow.append(wbLabel, wbCheckbox);
       panel.appendChild(wbRow);
 
+      const statusBarOpacityRow = hostDocument.createElement('div');
+      statusBarOpacityRow.className = SETTINGS_ROW_CLASS;
+      const statusBarOpacityLabel = hostDocument.createElement('label');
+      statusBarOpacityLabel.textContent = '状态条透明度(%)';
+      const statusBarOpacityInput = hostDocument.createElement('input');
+      statusBarOpacityInput.type = 'number';
+      statusBarOpacityInput.min = String(MIN_STATUS_BAR_OPACITY_PERCENT);
+      statusBarOpacityInput.max = String(MAX_STATUS_BAR_OPACITY_PERCENT);
+      statusBarOpacityInput.step = '5';
+      statusBarOpacityInput.value = String(getConfiguredStatusBarOpacityPercent());
+      statusBarOpacityRow.append(statusBarOpacityLabel, statusBarOpacityInput);
+      panel.appendChild(statusBarOpacityRow);
+
+      const statusBarScaleRow = hostDocument.createElement('div');
+      statusBarScaleRow.className = SETTINGS_ROW_CLASS;
+      const statusBarScaleLabel = hostDocument.createElement('label');
+      statusBarScaleLabel.textContent = '状态条大小(%)';
+      const statusBarScaleInput = hostDocument.createElement('input');
+      statusBarScaleInput.type = 'number';
+      statusBarScaleInput.min = String(MIN_STATUS_BAR_SCALE_PERCENT);
+      statusBarScaleInput.max = String(MAX_STATUS_BAR_SCALE_PERCENT);
+      statusBarScaleInput.step = '5';
+      statusBarScaleInput.value = String(getConfiguredStatusBarScalePercent());
+      statusBarScaleRow.append(statusBarScaleLabel, statusBarScaleInput);
+      panel.appendChild(statusBarScaleRow);
+
       const statusBarSimpleRow = hostDocument.createElement('div');
-      statusBarSimpleRow.className = SETTINGS_ROW_CLASS;
+      statusBarSimpleRow.className = `${SETTINGS_ROW_CLASS} ${SETTINGS_CHECKBOX_ROW_CLASS}`;
       const statusBarSimpleLabel = hostDocument.createElement('label');
       statusBarSimpleLabel.textContent = '状态栏简易模式（仅圆点）';
       const statusBarSimpleCheckbox = hostDocument.createElement('input');
@@ -1255,7 +1348,7 @@
       panel.appendChild(statusBarSimpleRow);
 
       const statusBarVerticalRow = hostDocument.createElement('div');
-      statusBarVerticalRow.className = SETTINGS_ROW_CLASS;
+      statusBarVerticalRow.className = `${SETTINGS_ROW_CLASS} ${SETTINGS_CHECKBOX_ROW_CLASS}`;
       const statusBarVerticalLabel = hostDocument.createElement('label');
       statusBarVerticalLabel.textContent = '状态栏竖版模式（侧边堆叠）';
       const statusBarVerticalCheckbox = hostDocument.createElement('input');
@@ -1307,6 +1400,8 @@
       const nextAuctionModeEnabled = Boolean(auctionCheckbox.checked);
       const nextSilentModeEnabled = Boolean(silentCheckbox.checked);
       const nextWorldbookSwitcherEnabled = Boolean(wbCheckbox.checked);
+      const nextStatusBarOpacityPercent = clampStatusBarOpacityPercent(Number(statusBarOpacityInput.value));
+      const nextStatusBarScalePercent = clampStatusBarScalePercent(Number(statusBarScaleInput.value));
       const nextStatusBarSimpleMode = Boolean(statusBarSimpleCheckbox.checked);
       const nextStatusBarVertical = Boolean(statusBarVerticalCheckbox.checked);
       const moduleSwitchChanged = nextOldFloorSwipeEnabled !== Boolean(config.old_floor_swipe_enabled)
@@ -1321,6 +1416,8 @@
         auction_mode_enabled: nextAuctionModeEnabled,
         silent_mode_enabled: nextSilentModeEnabled,
         parallel_temperatures: nextParallelTemperatures,
+        status_bar_opacity_percent: nextStatusBarOpacityPercent,
+        status_bar_scale_percent: nextStatusBarScalePercent,
         status_bar_simple_mode: nextStatusBarSimpleMode,
         status_bar_vertical: nextStatusBarVertical,
         old_floor_swipe_enabled: nextOldFloorSwipeEnabled,
@@ -2380,6 +2477,18 @@
     return Math.max(0, Math.min(MAX_MIN_REPLY_TOKENS, Math.floor(num)));
   }
 
+  function clampStatusBarOpacityPercent(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return DEFAULT_STATUS_BAR_OPACITY_PERCENT;
+    return Math.max(MIN_STATUS_BAR_OPACITY_PERCENT, Math.min(MAX_STATUS_BAR_OPACITY_PERCENT, Math.round(num)));
+  }
+
+  function clampStatusBarScalePercent(value) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return DEFAULT_STATUS_BAR_SCALE_PERCENT;
+    return Math.max(MIN_STATUS_BAR_SCALE_PERCENT, Math.min(MAX_STATUS_BAR_SCALE_PERCENT, Math.round(num)));
+  }
+
   function clampTemperature(value, fallback = DEFAULT_PARALLEL_TEMPERATURE) {
     const num = Number(value);
     if (Number.isFinite(num)) {
@@ -2493,6 +2602,18 @@
     return clampMinReplyTokens(config?.min_reply_tokens ?? DEFAULT_MIN_REPLY_TOKENS);
   }
 
+  function getConfiguredStatusBarOpacityPercent() {
+    return clampStatusBarOpacityPercent(
+      config?.status_bar_opacity_percent ?? DEFAULT_STATUS_BAR_OPACITY_PERCENT,
+    );
+  }
+
+  function getConfiguredStatusBarScalePercent() {
+    return clampStatusBarScalePercent(
+      config?.status_bar_scale_percent ?? DEFAULT_STATUS_BAR_SCALE_PERCENT,
+    );
+  }
+
   function isAuctionModeEnabled() {
     return normalizeBooleanFlag(config?.auction_mode_enabled, DEFAULT_CONFIG.auction_mode_enabled);
   }
@@ -2599,6 +2720,12 @@
       status_bar_collapsed: normalizeBooleanFlag(raw.status_bar_collapsed, DEFAULT_CONFIG.status_bar_collapsed),
       status_bar_simple_mode: normalizeBooleanFlag(raw.status_bar_simple_mode, DEFAULT_CONFIG.status_bar_simple_mode),
       status_bar_vertical: normalizeBooleanFlag(raw.status_bar_vertical, DEFAULT_CONFIG.status_bar_vertical),
+      status_bar_opacity_percent: clampStatusBarOpacityPercent(
+        raw.status_bar_opacity_percent ?? DEFAULT_CONFIG.status_bar_opacity_percent,
+      ),
+      status_bar_scale_percent: clampStatusBarScalePercent(
+        raw.status_bar_scale_percent ?? DEFAULT_CONFIG.status_bar_scale_percent,
+      ),
       old_floor_swipe_enabled: normalizeBooleanFlag(raw.old_floor_swipe_enabled, DEFAULT_CONFIG.old_floor_swipe_enabled),
       worldbook_switcher_enabled: normalizeBooleanFlag(
         raw.worldbook_switcher_enabled,
@@ -7799,6 +7926,8 @@
       parallel_temperatures: getConfiguredParallelTemperatures(),
       status_bar_simple_mode: Boolean(config.status_bar_simple_mode),
       status_bar_vertical: Boolean(config.status_bar_vertical),
+      status_bar_opacity_percent: getConfiguredStatusBarOpacityPercent(),
+      status_bar_scale_percent: getConfiguredStatusBarScalePercent(),
       old_floor_swipe_enabled: Boolean(config.old_floor_swipe_enabled),
       worldbook_switcher_enabled: Boolean(config.worldbook_switcher_enabled),
       current_source: source,
