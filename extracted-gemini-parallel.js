@@ -13,6 +13,7 @@
   const FORCE_SINGLE_FOREGROUND_SOURCES = new Set(['openai', 'custom', 'openrouter', 'azure_openai']);
   const ALLOWED_TYPES = new Set(['normal', 'regenerate', 'continue']);
   const CONFIG_KEY = 'gemini_parallel_swipe_config';
+  const STATUS_BAR_POSITION_STORAGE_KEY = 'gemini_parallel_swipe_status_bar_position';
   const STATUS_BAR_STYLE_ID = 'gemini-parallel-status-style';
   const STATUS_BAR_CLASS = 'gemini-parallel-status-bar';
   const STATUS_BAR_TEXT_CLASS = 'gemini-parallel-status-text';
@@ -240,6 +241,22 @@
       return hostWindow.document;
     }
     return document;
+  }
+
+  function getHostLocalStorage() {
+    try {
+      const hostWindow = getHostWindow();
+      if (hostWindow?.localStorage) {
+        return hostWindow.localStorage;
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      return window.localStorage;
+    } catch {
+      return null;
+    }
   }
 
   function getChatContainer() {
@@ -1588,6 +1605,31 @@
     };
   }
 
+  function loadStatusBarPositionFromLocalStorage() {
+    const storage = getHostLocalStorage();
+    if (!storage || typeof storage.getItem !== 'function') return null;
+    try {
+      const raw = storage.getItem(STATUS_BAR_POSITION_STORAGE_KEY);
+      const parsed = parseStoredConfigCandidate(raw);
+      const normalized = normalizeStatusBarPositionStore(parsed);
+      return normalized.horizontal || normalized.vertical ? normalized : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function saveStatusBarPositionToLocalStorage(positionStore) {
+    const storage = getHostLocalStorage();
+    if (!storage || typeof storage.setItem !== 'function') return false;
+    try {
+      const normalized = normalizeStatusBarPositionStore(positionStore);
+      storage.setItem(STATUS_BAR_POSITION_STORAGE_KEY, JSON.stringify(normalized));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function getStatusBarLayoutKey() {
     return isStatusBarVertical() ? 'vertical' : 'horizontal';
   }
@@ -1953,6 +1995,7 @@
         ...config,
         status_bar_position: nextPositionStore,
       });
+      saveStatusBarPositionToLocalStorage(nextPositionStore);
       saveConfig();
     }
     return { left: clampedLeft, top: clampedTop };
@@ -1979,6 +2022,7 @@
         ...config,
         status_bar_position: nextPositionStore,
       });
+      saveStatusBarPositionToLocalStorage(nextPositionStore);
       saveConfig();
     }
     return true;
@@ -2661,6 +2705,50 @@
     }
   }
 
+  function isPlainObject(value) {
+    return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+  }
+
+  function mergeStoredConfigFragment(base, incoming) {
+    const merged = isPlainObject(base) ? { ...base } : {};
+    if (!isPlainObject(incoming)) return merged;
+
+    for (const [key, value] of Object.entries(incoming)) {
+      if (Array.isArray(value)) {
+        merged[key] = value.slice();
+        continue;
+      }
+      if (isPlainObject(value)) {
+        const current = isPlainObject(merged[key]) ? merged[key] : {};
+        merged[key] = mergeStoredConfigFragment(current, value);
+        continue;
+      }
+      if (value !== undefined) {
+        merged[key] = value;
+      }
+    }
+    return merged;
+  }
+
+  function mergeStoredStatusBarPosition(candidates) {
+    const mergedStore = {
+      horizontal: null,
+      vertical: null,
+    };
+
+    for (const candidate of candidates) {
+      const store = normalizeStatusBarPositionStore(candidate?.status_bar_position);
+      if (store.horizontal) {
+        mergedStore.horizontal = store.horizontal;
+      }
+      if (store.vertical) {
+        mergedStore.vertical = store.vertical;
+      }
+    }
+
+    return mergedStore.horizontal || mergedStore.vertical ? mergedStore : null;
+  }
+
   function normalizeWorldbookSwitcherConfig(rawConfig) {
     const raw = rawConfig && typeof rawConfig === 'object' ? rawConfig : {};
     const defaults = DEFAULT_CONFIG.worldbook_switcher;
@@ -2740,18 +2828,45 @@
       if (typeof getVariables !== 'function') {
         return normalizeConfig(undefined);
       }
-      for (const scope of getScriptVariableScopes()) {
+      const candidates = [];
+      const scopes = [...getScriptVariableScopes()].reverse();
+      for (const scope of scopes) {
         const vars = getVariables(scope);
         const parsed = parseStoredConfigCandidate(vars?.[CONFIG_KEY]);
         if (parsed) {
-          return normalizeConfig(parsed);
+          candidates.push(parsed);
         }
       }
-      return normalizeConfig(undefined);
+      const localStatusBarPosition = loadStatusBarPositionFromLocalStorage();
+      if (!candidates.length && !localStatusBarPosition) {
+        return normalizeConfig(undefined);
+      }
+
+      const merged = candidates.reduce((acc, candidate) => mergeStoredConfigFragment(acc, candidate), {});
+      const statusBarPositionCandidates = [...candidates];
+      if (localStatusBarPosition) {
+        statusBarPositionCandidates.push({ status_bar_position: localStatusBarPosition });
+      }
+      const mergedStatusBarPosition = mergeStoredStatusBarPosition(statusBarPositionCandidates);
+      if (mergedStatusBarPosition) {
+        merged.status_bar_position = mergedStatusBarPosition;
+      }
+      return normalizeConfig(merged);
     } catch (error) {
       warn('读取脚本变量失败，使用默认配置:', error);
       return normalizeConfig(undefined);
     }
+  }
+
+  function reloadConfigFromStorage(options = {}) {
+    config = loadConfig();
+    if (config?.status_bar_position) {
+      saveStatusBarPositionToLocalStorage(config.status_bar_position);
+    }
+    if (options.refreshStatusBar !== false) {
+      refreshStatusBarForRetryState();
+    }
+    return config;
   }
 
   async function saveConfig() {
@@ -2909,6 +3024,11 @@
       applyDataSourceVisibility();
       refreshStatusBarForRetryState();
     }, 60);
+  }
+
+  function onAppReady() {
+    reloadConfigFromStorage({ refreshStatusBar: false });
+    scheduleUiPatch();
   }
 
   function isPlainSlashCommand(text) {
@@ -7827,7 +7947,7 @@
       return;
     }
 
-    bindEvent(tavern_events.APP_READY, scheduleUiPatch);
+    bindEvent(tavern_events.APP_READY, onAppReady);
     bindEvent(tavern_events.CHATCOMPLETION_SOURCE_CHANGED, scheduleUiPatch);
     bindEvent(tavern_events.OAI_PRESET_CHANGED_AFTER, scheduleUiPatch);
     bindEvent(tavern_events.GENERATION_STARTED, onGenerationStarted);
@@ -8107,6 +8227,7 @@
   }
 
   function init() {
+    runSafe('reload config', () => reloadConfigFromStorage({ refreshStatusBar: false }));
     // 先暴露 API，避免任何后续模块异常导致调试入口缺失
     exposeDebugApi();
     runSafe('安装前台重试补丁', () => installGenerateFetchRetryPatch());
