@@ -2011,20 +2011,9 @@
     if (!next) {
       return false;
     }
-
-    if (next.left !== saved.left || next.top !== saved.top) {
-      const layoutKey = getStatusBarLayoutKey();
-      const nextPositionStore = {
-        ...normalizeStatusBarPositionStore(config?.status_bar_position),
-        [layoutKey]: next,
-      };
-      config = normalizeConfig({
-        ...config,
-        status_bar_position: nextPositionStore,
-      });
-      saveStatusBarPositionToLocalStorage(nextPositionStore);
-      saveConfig();
-    }
+    // 这里只做显示层面的夹取，不回写存储。
+    // 移动端键盘弹起会临时压缩视口，如果在这里持久化，
+    // 底部状态栏会被错误保存到中间位置。
     return true;
   }
 
@@ -4226,17 +4215,28 @@
       : AUCTION_FOREGROUND_UNCERTAIN_SETTLE_GRACE_MS;
   }
 
-  function getAuctionForegroundSettleWaitMs(job, target) {
+  function hasForegroundSettlementSignal(job) {
+    return Boolean(job?.foregroundEnded || job?.foregroundStopped);
+  }
+
+  function getAuctionForegroundSettleWaitMs(job, target, targetMessageId = null) {
     if (!isAuctionJob(job) || job?.winnerSource !== 'background') {
       return 0;
     }
     if (!target || target.mode !== 'create_after_user') {
       return 0;
     }
-
-    const settledAt = Number(job.auctionSettledAt) || 0;
-    if (settledAt <= 0) {
+    if (normalizeMessageId(targetMessageId) !== null) {
       return 0;
+    }
+
+    if (!hasForegroundSettlementSignal(job)) {
+      return getAuctionForegroundSettleGraceMs(job);
+    }
+
+    const settledAt = Number(job.foregroundSettledAt) || Number(job.auctionSettledAt) || 0;
+    if (settledAt <= 0) {
+      return getAuctionForegroundSettleGraceMs(job);
     }
 
     const graceMs = getAuctionForegroundSettleGraceMs(job);
@@ -4666,7 +4666,6 @@
     if (normalizedSource === 'background') {
       abortForegroundValidation('竞标模式后台候选已胜出');
       stopForegroundGenerationForAuction(job, '竞标模式后台候选已胜出');
-      job.foregroundStopped = true;
       job.foregroundValidationDone = true;
       job.foregroundValidationPassed = false;
     }
@@ -4755,15 +4754,23 @@
       return { settled: false, written: false, pending: true };
     }
 
-    const settleWaitMs = getAuctionForegroundSettleWaitMs(job, target);
+    const preferredTargetMessageId = target.mode === 'append_assistant'
+      ? normalizeMessageId(target.messageId)
+      : null;
+    const targetMessageId = preferredTargetMessageId
+      ?? normalizeMessageId(job.targetMessageIdFromEvent)
+      ?? normalizeMessageId(job.targetMessageId);
+    const settleWaitMs = getAuctionForegroundSettleWaitMs(job, target, targetMessageId);
     if (settleWaitMs > 0) {
       debug('竞标模式等待前台楼层结算，暂缓创建新楼层', {
         jobId: job.id,
         waitMs: settleWaitMs,
         target,
+        targetMessageId,
         foregroundEnded: Boolean(job.foregroundEnded),
         foregroundStopped: Boolean(job.foregroundStopped),
         foregroundStopRequested: Boolean(job.foregroundStopRequested),
+        foregroundSettledAt: Number(job.foregroundSettledAt) || 0,
       });
       return {
         settled: false,
@@ -4776,10 +4783,6 @@
     setJobPhase(job, JOB_PHASES.writing);
 
     let writeResult = { appended: false, messageId: null, swipeId: null };
-    const preferredTargetMessageId = target.mode === 'append_assistant'
-      ? normalizeMessageId(target.messageId)
-      : null;
-    const targetMessageId = preferredTargetMessageId ?? normalizeMessageId(job.targetMessageId);
 
     if (targetMessageId !== null) {
       writeResult = await appendSwipes(targetMessageId, [winnerText], { activateNewest: true });
@@ -5312,6 +5315,7 @@
         foregroundValidationDone: !shouldValidateForegroundMinReplyTokens(),
         foregroundValidationPassed: !shouldValidateForegroundMinReplyTokens(),
         foregroundStopRequested: false,
+        foregroundSettledAt: 0,
         auctionEnabled: isAuctionModeEnabled(),
         winnerSource: '',
         winnerText: '',
@@ -5379,6 +5383,9 @@
     if (isJobTerminal(job)) return;
 
     job.foregroundStopped = true;
+    if (!(Number(job.foregroundSettledAt) > 0)) {
+      job.foregroundSettledAt = Date.now();
+    }
     job.foregroundValidationDone = true;
     job.foregroundValidationPassed = false;
     refreshStatusBarForRetryState();
@@ -5395,6 +5402,9 @@
 
     if (job && !isJobTerminal(job)) {
       job.foregroundEnded = true;
+      if (!(Number(job.foregroundSettledAt) > 0)) {
+        job.foregroundSettledAt = Date.now();
+      }
       job.generationEndedValue = messageId;
       job.foregroundValidationDone = !shouldValidateForegroundMinReplyTokens();
       job.foregroundValidationPassed = !shouldValidateForegroundMinReplyTokens();
@@ -5436,6 +5446,11 @@
     if (message && Number.isFinite(Number(message.message_id))) {
       job.targetMessageIdFromEvent = Number(message.message_id);
       job.targetMessageId = Number(message.message_id);
+      job.writeTarget = {
+        mode: 'append_assistant',
+        messageId: Number(message.message_id),
+        source: 'message_received',
+      };
       debug('MESSAGE_RECEIVED 绑定目标楼层成功', {
         jobId: job.id,
         messageId: Number(message.message_id),
