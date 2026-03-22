@@ -6849,8 +6849,11 @@
     `;
   }
 
-  function renderFullscreenEditorView(entry, worldbookName, themeColors) {
+  function renderFullscreenEditorView(entry, worldbookName, themeColors, sourceMode = 'desktop') {
     const entryTitle = getEntryDisplayName(entry, 60);
+    const shellStyle = sourceMode === 'mobile'
+      ? `width: 100vw; height: 100dvh; min-height: 100dvh; display: flex; flex-direction: column; background: ${themeColors.background};`
+      : 'width: 100%; height: 100%; min-height: 100dvh; display: flex; flex-direction: column; background: var(--wb-editor-bg);';
     return `
       <style>
         #wb-entry-fullscreen-editor {
@@ -6863,9 +6866,9 @@
           --wb-editor-muted: ${themeColors.secondaryText};
           position: fixed; inset: 0; z-index: 10030; background: rgba(9, 11, 16, 0.72); backdrop-filter: blur(6px); color: var(--wb-editor-text);
         }
-        #wb-entry-fullscreen-editor .wb-entry-editor-shell { width: 100%; height: 100%; display: flex; flex-direction: column; background: var(--wb-editor-bg); }
+        #wb-entry-fullscreen-editor .wb-entry-editor-shell { width: 100%; height: 100%; min-height: 100dvh; display: flex; flex-direction: column; background: var(--wb-editor-bg); }
         #wb-entry-fullscreen-editor .wb-entry-editor-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px 12px; border-bottom: 1px solid var(--wb-editor-border); }
-        #wb-entry-fullscreen-editor .wb-entry-editor-meta { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-meta { min-width: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 4px; }
         #wb-entry-fullscreen-editor .wb-entry-editor-title { font-size: 1.05em; font-weight: 700; color: var(--wb-editor-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         #wb-entry-fullscreen-editor .wb-entry-editor-subtitle { font-size: 0.82em; color: var(--wb-editor-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         #wb-entry-fullscreen-editor .wb-entry-editor-actions { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
@@ -6898,8 +6901,78 @@
         #wb-entry-fullscreen-editor .wb-entry-editor-dialog-select,
         #wb-entry-fullscreen-editor .wb-entry-editor-dialog-input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--wb-editor-border); background: var(--wb-editor-input-bg); color: var(--wb-editor-input-text); }
         #wb-entry-fullscreen-editor .wb-entry-editor-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] {
+          background: ${themeColors.background};
+          backdrop-filter: none;
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-shell {
+          min-height: 100dvh;
+          background: ${themeColors.background};
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-header {
+          position: sticky;
+          top: 0;
+          z-index: 2;
+          gap: 10px;
+          padding: calc(10px + env(safe-area-inset-top, 0px)) 12px 10px;
+          background: var(--wb-editor-bg);
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-subtitle {
+          display: none;
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-actions {
+          gap: 6px;
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-action-btn {
+          width: 38px;
+          min-width: 38px;
+          padding: 0;
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-action-btn span {
+          display: none;
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-toolbar {
+          position: sticky;
+          top: calc(58px + env(safe-area-inset-top, 0px));
+          z-index: 2;
+          flex-wrap: nowrap;
+          overflow-x: auto;
+          overflow-y: hidden;
+          gap: 8px;
+          padding: 10px 12px;
+          background: var(--wb-editor-bg);
+          -webkit-overflow-scrolling: touch;
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-toolbar-group {
+          flex-wrap: nowrap;
+          flex: 0 0 auto;
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-tool-btn {
+          min-width: 34px;
+          height: 34px;
+          padding: 0 9px;
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-body {
+          padding: 10px 12px 8px;
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-textarea {
+          padding: 14px;
+          border-radius: 12px;
+          font-size: 0.96em;
+          line-height: 1.55;
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-footer {
+          padding: 0 12px calc(12px + env(safe-area-inset-bottom, 0px));
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-dialog-backdrop {
+          padding: 12px;
+        }
+        #wb-entry-fullscreen-editor[data-mode="mobile"] .wb-entry-editor-dialog {
+          width: 100%;
+          max-width: none;
+        }
       </style>
-      <div class="wb-entry-editor-shell">
+      <div class="wb-entry-editor-shell" style="${shellStyle}">
         <div class="wb-entry-editor-header">
           <div class="wb-entry-editor-meta"><div class="wb-entry-editor-title">${escapeHtml(entryTitle)}</div><div class="wb-entry-editor-subtitle">${escapeHtml(worldbookName)}</div></div>
           <div class="wb-entry-editor-actions">
@@ -6977,13 +7050,40 @@
     if (!force && isDirty && !view.confirm('正文内容尚未保存，确定关闭吗？')) {
       return false;
     }
+    const fullscreenContext = currentState.fullscreenEditorContext;
+    if (fullscreenContext?.sourceMode === 'mobile') {
+      $('#worldbook-switcher-mobile-menu', parentDoc).remove();
+      $(parentDoc).off('.wbmobilemenu');
+    }
     $editor.remove();
     currentState.fullscreenEditorContext = null;
+    if (fullscreenContext?.sourceMode === 'mobile') {
+      void (async () => {
+        await showMobileMenu(fullscreenContext.restoreTab ?? 1);
+        await openMobileEntryDetailView(fullscreenContext.worldbookName, fullscreenContext.uid);
+      })();
+    }
     return true;
   }
 
   async function openFullscreenEntryEditor(worldbookName, uid, sourceMode = 'desktop') {
     const targetUid = parseInt(uid, 10);
+    const effectiveSourceMode =
+      sourceMode === 'mobile' ||
+      Boolean(currentState.mobileDetailContext) ||
+      $('#wb-mobile-detail-view', parentDoc).is(':visible') ||
+      $('#worldbook-switcher-mobile-menu', parentDoc).length
+        ? 'mobile'
+        : 'desktop';
+    console.log('[WorldbookSwitcher][FS_ENTER]', {
+      worldbookName,
+      uid: targetUid,
+      sourceMode,
+      effectiveSourceMode,
+      mobileDetailContext: currentState.mobileDetailContext,
+      mobileDetailVisible: $('#wb-mobile-detail-view', parentDoc).is(':visible'),
+      mobileMenuCount: $('#worldbook-switcher-mobile-menu', parentDoc).length,
+    });
     const $existing = $('#wb-entry-fullscreen-editor', parentDoc);
     if ($existing.length) {
       const sameEntry =
@@ -6999,21 +7099,72 @@
     const payload = await getEntryDetailPayload(worldbookName, targetUid);
     if (!payload) return;
     const themeColors = getThemeColors();
+    const outerStyle = effectiveSourceMode === 'mobile'
+      ? `position: relative; width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; padding: 0; background: ${themeColors.background}; color: ${themeColors.text}; overflow: hidden;`
+      : 'position: fixed; inset: 0; z-index: 10030; background: rgba(9, 11, 16, 0.72); backdrop-filter: blur(6px); color: var(--wb-editor-text);';
     const editorHtml = `
-      <div id="wb-entry-fullscreen-editor" ${buildDataAttrs({ worldbook: worldbookName, uid: targetUid })}>
-        ${renderFullscreenEditorView(payload.entry, worldbookName, themeColors)}
+      <div id="wb-entry-fullscreen-editor" ${buildDataAttrs({ worldbook: worldbookName, uid: targetUid, mode: effectiveSourceMode })} style="${outerStyle}">
+        ${renderFullscreenEditorView(payload.entry, worldbookName, themeColors, effectiveSourceMode)}
       </div>
     `;
 
-    $('body', parentDoc).append(editorHtml);
-    const $editor = $('#wb-entry-fullscreen-editor', parentDoc);
+    let $editor;
+    if (effectiveSourceMode === 'mobile') {
+      const $mobileMenu = $('#worldbook-switcher-mobile-menu', parentDoc);
+      console.log('[WorldbookSwitcher][FS_MOBILE_BRANCH]', {
+        hasMobileMenu: $mobileMenu.length > 0,
+      });
+      const mobileHostStyle = `
+        position: fixed;
+        inset: 0;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        width: 100vw;
+        height: 100dvh;
+        max-width: none;
+        max-height: none;
+        z-index: 2147483647;
+        margin: 0;
+        padding: 0;
+        border: none;
+        border-radius: 0;
+        box-shadow: none;
+        background: ${themeColors.background};
+        display: flex;
+        flex-direction: column;
+        color: ${themeColors.text};
+        overflow: hidden;
+      `.replace(/\s+/g, ' ').trim();
+      if ($mobileMenu.length) {
+        $mobileMenu.attr('style', mobileHostStyle).html(editorHtml);
+      } else {
+        $('body', parentDoc).append(`
+          <div id="worldbook-switcher-mobile-menu" style="${mobileHostStyle}">
+            ${editorHtml}
+          </div>
+        `);
+      }
+      $editor = $('#wb-entry-fullscreen-editor', parentDoc);
+    } else {
+      $('body', parentDoc).append(editorHtml);
+      $editor = $('#wb-entry-fullscreen-editor', parentDoc);
+    }
+    console.log('[WorldbookSwitcher][FS_CREATED]', {
+      editorCount: $('#wb-entry-fullscreen-editor', parentDoc).length,
+      effectiveSourceMode,
+    });
     $editor.data('initialContent', String(payload.entry.content || ''));
     $editor.data('dirty', false);
     currentState.fullscreenEditorContext = {
       worldbookName,
       uid: targetUid,
       initialContent: String(payload.entry.content || ''),
-      sourceMode,
+      sourceMode: effectiveSourceMode,
+      restoreTab: effectiveSourceMode === 'mobile'
+        ? (currentState.mobileDetailContext?.tab ?? currentState.mobileActiveTab ?? 1)
+        : null,
     };
     bindFullscreenEntryEditor($editor, { worldbookName, targetUid, onClose: closeFullscreenEntryEditor });
     getFullscreenEditorTextarea($editor)?.focus();
@@ -7476,8 +7627,17 @@
       e.stopPropagation();
       onClose?.();
     });
-    $container.on('click.wbentrydetail', '.wb-entry-detail-expand', function(e) {
+    $container.on('click.wbentrydetail touchend.wbentrydetail', '.wb-entry-detail-expand', function(e) {
+      if (e.type === 'touchend') {
+        e.preventDefault();
+      }
       e.stopPropagation();
+      console.log('[WorldbookSwitcher][EXPAND_CLICK]', {
+        worldbookName,
+        targetUid,
+        mode,
+        eventType: e.type,
+      });
       void openFullscreenEntryEditor(worldbookName, targetUid, mode);
     });
     $container.on('click.wbentrydetail', '.wb-entry-detail-strategy-btn', function(e) {
