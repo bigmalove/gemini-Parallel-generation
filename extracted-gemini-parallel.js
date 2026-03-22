@@ -6175,7 +6175,1409 @@
     selectedWorldbook: '',
     entries: [],
     isIntercepting: true, // 是否拦截原生图标点击
+    mobileActiveTab: 1,
+    mobileDetailContext: null,
+    fullscreenEditorContext: null,
   };
+
+  const ENTRY_STRATEGY_OPTIONS = [
+    { value: 'constant', label: '常量（蓝灯）', icon: 'fa-solid fa-circle', color: '#60A5FA' },
+    { value: 'selective', label: '关键词触发（绿灯）', icon: 'fa-solid fa-circle', color: '#6EE7B7' },
+    { value: 'vectorized', label: '向量化', icon: 'fa-solid fa-link', color: '#C084FC' },
+  ];
+
+  const ENTRY_POSITION_OPTIONS = [
+    { value: 'before_character_definition', label: '角色定义前' },
+    { value: 'after_character_definition', label: '角色定义后' },
+    { value: 'before_example_messages', label: '示例消息前' },
+    { value: 'after_example_messages', label: '示例消息后' },
+    { value: 'before_author_note', label: '作者注释前' },
+    { value: 'after_author_note', label: '作者注释后' },
+    { value: 'at_depth', label: '指定深度' },
+    { value: 'outlet', label: 'Outlet' },
+  ];
+
+  function escapeAttr(text) {
+    return String(text ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function buildDataAttrs(data) {
+    return Object.entries(data || {})
+      .map(([key, value]) => `data-${key}="${escapeAttr(value)}"`)
+      .join(' ');
+  }
+
+  function getEntryDisplayName(entry, maxChars = 15) {
+    return entry?.name || truncateText(entry?.content, maxChars) || '(无标题)';
+  }
+
+  function renderEntryStrategyButtons(selectedValue) {
+    return ENTRY_STRATEGY_OPTIONS
+      .map(option => {
+        const isActive = option.value === selectedValue;
+        return `
+          <button
+            type="button"
+            class="wb-entry-detail-strategy-btn"
+            data-value="${option.value}"
+            data-active="${isActive ? 'true' : 'false'}"
+            aria-pressed="${isActive ? 'true' : 'false'}"
+            title="${escapeAttr(option.label)}"
+            style="--wb-strategy-color: ${option.color};"
+          >
+            <i class="${option.icon}"></i>
+          </button>
+        `;
+      })
+      .join('');
+  }
+
+  function renderToggleSwitch({ className, checked, dataAttrs, activeColor = '#10B981' }) {
+    return `
+      <label style="
+        position: relative;
+        display: inline-block;
+        width: 32px;
+        height: 18px;
+        flex-shrink: 0;
+        cursor: pointer;
+      ">
+        <input type="checkbox" class="${className}" ${buildDataAttrs(dataAttrs)}
+          ${checked ? 'checked' : ''}
+          style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
+        <span style="
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background-color: ${checked ? activeColor : '#6B7280'};
+          transition: 0.3s;
+          border-radius: 18px;
+          pointer-events: none;
+        "></span>
+        <span style="
+          position: absolute;
+          height: 14px;
+          width: 14px;
+          left: ${checked ? '16px' : '2px'};
+          bottom: 2px;
+          background-color: white;
+          transition: 0.3s;
+          border-radius: 50%;
+          pointer-events: none;
+        "></span>
+      </label>
+    `;
+  }
+
+  function renderEntryDetailButton(themeColors, worldbookName, uid, { compact = false } = {}) {
+    return `
+      <button class="wb-entry-detail-btn" ${buildDataAttrs({ worldbook: worldbookName, uid })} title="查看详情" style="
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        flex-shrink: 0;
+        padding: ${compact ? '2px 6px' : '4px 8px'};
+        border-radius: 4px;
+        border: 1px solid ${themeColors.border};
+        background: rgba(139, 92, 246, 0.18);
+        color: ${themeColors.text};
+        cursor: pointer;
+        font-size: ${compact ? '0.72em' : '0.75em'};
+        line-height: 1;
+      ">
+        <i class="fa-solid fa-eye"></i>${compact ? '' : '<span>详情</span>'}
+      </button>
+    `;
+  }
+
+  function renderCurrentWorldbookEntry(entry, themeColors, { variant = 'desktop', worldbookName }) {
+    const rowClass = variant === 'desktop' ? 'wb-simple-entry' : 'wb-mobile-entry';
+    const toggleClass = variant === 'desktop' ? 'wb-simple-toggle' : 'wb-mobile-entry-toggle';
+    const displayName = getEntryDisplayName(entry);
+    return `
+      <div class="${rowClass}" data-uid="${entry.uid}" style="
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 0.8em;
+        ${!entry.enabled ? 'opacity: 0.5;' : ''}
+        transition: background 0.15s;
+      " onmouseover="this.style.background='rgba(139,92,246,0.15)'" onmouseout="this.style.background='transparent'">
+        ${renderToggleSwitch({
+          className: toggleClass,
+          checked: entry.enabled,
+          dataAttrs: { uid: entry.uid },
+        })}
+        <span class="wb-entry-name" style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+          ${escapeHtml(displayName)}
+        </span>
+        ${renderEntryDetailButton(themeColors, worldbookName, entry.uid, { compact: variant !== 'desktop' })}
+      </div>
+    `;
+  }
+
+  function renderCurrentWorldbookEntries(entries, themeColors, { variant = 'desktop', worldbookName }) {
+    if (!entries.length) {
+      return `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无条目</div>`;
+    }
+    return entries
+      .map(entry => renderCurrentWorldbookEntry(entry, themeColors, { variant, worldbookName }))
+      .join('');
+  }
+
+  async function getFrequentEntriesWithState(limit = 30) {
+    const frequentEntries = getFrequentEntries(limit);
+    const entriesWithState = [];
+    for (const frequentEntry of frequentEntries) {
+      try {
+        const wbEntries = await getWorldbookEntries(frequentEntry.worldbook);
+        const wbEntry = wbEntries.find(e => e.uid === frequentEntry.uid);
+        if (!wbEntry) continue;
+        entriesWithState.push({ ...frequentEntry, ...wbEntry, enabled: wbEntry.enabled });
+      } catch (error) {
+        console.warn('[WorldbookSwitcher] 获取常用条目状态失败:', frequentEntry.worldbook, frequentEntry.uid, error);
+      }
+    }
+    return entriesWithState;
+  }
+
+  function renderFrequentEntry(entry, themeColors, { variant = 'desktop' } = {}) {
+    const rowClass = variant === 'desktop' ? 'wb-frequent-entry' : 'wb-mobile-frequent';
+    const toggleClass = variant === 'desktop' ? 'wb-frequent-toggle' : 'wb-mobile-frequent-toggle';
+    const pinClass = variant === 'desktop' ? 'wb-frequent-pin' : 'wb-mobile-frequent-pin';
+    const removeClass = variant === 'desktop' ? 'wb-frequent-remove' : 'wb-mobile-frequent-remove';
+    return `
+      <div class="${rowClass}" ${buildDataAttrs({ worldbook: entry.worldbook, uid: entry.uid })} style="
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px;
+        border-radius: 4px;
+        ${variant === 'desktop' ? 'cursor: pointer;' : ''}
+        font-size: 0.8em;
+        ${!entry.enabled ? 'opacity: 0.5;' : ''}
+        transition: background 0.15s;
+      " onmouseover="this.style.background='rgba(245,158,11,0.15)'" onmouseout="this.style.background='transparent'">
+        ${renderToggleSwitch({
+          className: toggleClass,
+          checked: entry.enabled,
+          dataAttrs: { worldbook: entry.worldbook, uid: entry.uid },
+        })}
+        <div style="flex: 1; overflow: hidden; min-width: 0;">
+          <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+            ${entry.pinned ? '<i class="fa-solid fa-thumbtack" style="color: #F59E0B; margin-right: 4px; font-size: 0.8em;"></i>' : ''}${escapeHtml(entry.name || '(无标题)')}
+          </div>
+          <div style="font-size: 0.75em; color: ${themeColors.secondaryText}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+            ${escapeHtml(entry.worldbook)}
+          </div>
+        </div>
+        <div style="display: flex; gap: 4px; flex-shrink: 0;">
+          <button class="${pinClass}" ${buildDataAttrs({ worldbook: entry.worldbook, uid: entry.uid, pinned: entry.pinned })} title="${entry.pinned ? '取消置顶' : '置顶'}" style="
+            background: ${entry.pinned ? 'linear-gradient(135deg, #F59E0B 0%, #D97706 100%)' : 'transparent'};
+            color: ${entry.pinned ? 'white' : themeColors.secondaryText};
+            border: ${entry.pinned ? 'none' : '1px solid ' + themeColors.border};
+            border-radius: 4px;
+            padding: 2px 6px;
+            cursor: pointer;
+            font-size: 0.7em;
+          ">
+            <i class="fa-solid fa-thumbtack"></i>
+          </button>
+          ${renderEntryDetailButton(themeColors, entry.worldbook, entry.uid, { compact: true })}
+          <button class="${removeClass}" ${buildDataAttrs({ worldbook: entry.worldbook, uid: entry.uid })} title="从历史移除" style="
+            background: transparent;
+            color: ${themeColors.secondaryText};
+            border: 1px solid ${themeColors.border};
+            border-radius: 4px;
+            padding: 2px 6px;
+            cursor: pointer;
+            font-size: 0.7em;
+          ">
+            <i class="fa-solid fa-trash"></i>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderFrequentEntries(entries, themeColors, { variant = 'desktop' } = {}) {
+    if (!entries.length) {
+      return variant === 'desktop'
+        ? `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无使用记录<br><span style="font-size: 0.8em;">开关条目后会在此显示</span></div>`
+        : `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无使用记录</div>`;
+    }
+    return entries.map(entry => renderFrequentEntry(entry, themeColors, { variant })).join('');
+  }
+
+  function resolveEntryDetailContainer(containerOrSelector) {
+    if (containerOrSelector?.jquery) {
+      return containerOrSelector.first();
+    }
+    if (typeof containerOrSelector === 'string' && containerOrSelector) {
+      return $(containerOrSelector, parentDoc).first();
+    }
+    return $();
+  }
+
+  function updateEntryDetailDepthState(containerOrSelector) {
+    const $container = resolveEntryDetailContainer(containerOrSelector);
+    if (!$container.length) return;
+    const positionType = String($container.find('.wb-entry-detail-position-select').val() || '');
+    const isAtDepth = positionType === 'at_depth';
+    $container.find('.wb-entry-detail-depth-row').toggle(isAtDepth);
+    $container.find('.wb-entry-detail-depth-input').prop('disabled', !isAtDepth);
+  }
+
+  function updateEntryDetailStrategyState(containerOrSelector, nextStrategyType) {
+    const $container = resolveEntryDetailContainer(containerOrSelector);
+    if (!$container.length) return;
+    const strategyType = String(nextStrategyType || $container.find('.wb-entry-detail-strategy-input').val() || 'constant');
+    $container.find('.wb-entry-detail-strategy-input').val(strategyType);
+    $container.find('.wb-entry-detail-strategy-btn').each(function() {
+      const isActive = $(this).attr('data-value') === strategyType;
+      $(this)
+        .attr('data-active', isActive ? 'true' : 'false')
+        .attr('aria-pressed', isActive ? 'true' : 'false');
+    });
+  }
+
+  function setEntryDetailFeedback(containerOrSelector, message, isError = false) {
+    const $container = resolveEntryDetailContainer(containerOrSelector);
+    if (!$container.length) return;
+    const $feedback = $container.find('.wb-entry-detail-feedback');
+    if (!$feedback.length) return;
+    if (!isError) {
+      $feedback.text('').hide();
+      return;
+    }
+    $feedback
+      .text(message || '')
+      .css('color', '#FCA5A5')
+      .toggle(Boolean(message));
+  }
+
+  function closeEntryDetailPanel() {
+    $('#wb-entry-detail-panel', parentDoc).remove();
+  }
+
+  function removeFrequentEntriesPanel({ repositionDetail = true } = {}) {
+    $('#wb-frequent-entries-panel', parentDoc).remove();
+    if (repositionDetail) {
+      repositionEntryDetailPanel();
+    }
+  }
+
+  function closeDesktopMenuPanels() {
+    $('#worldbook-switcher-simple-menu', parentDoc).remove();
+    $('#wb-all-worldbooks-panel', parentDoc).remove();
+    removeFrequentEntriesPanel({ repositionDetail: false });
+    closeEntryDetailPanel();
+  }
+
+  async function refreshCurrentWorldbookViews(worldbookName) {
+    if (worldbookName === currentState.selectedWorldbook) {
+      currentState.entries = await getWorldbookEntries(worldbookName);
+      const themeColors = getThemeColors();
+      if ($('#wb-simple-entries', parentDoc).length) {
+        $('#wb-simple-entries', parentDoc).html(
+          renderCurrentWorldbookEntries(currentState.entries, themeColors, {
+            variant: 'desktop',
+            worldbookName,
+          }),
+        );
+      }
+      if ($('#wb-mobile-entries-list', parentDoc).length) {
+        $('#wb-mobile-entries-list', parentDoc).html(
+          renderCurrentWorldbookEntries(currentState.entries, themeColors, {
+            variant: 'mobile',
+            worldbookName,
+          }),
+        );
+      }
+    }
+  }
+
+  async function refreshFrequentEntryViews() {
+    const themeColors = getThemeColors();
+    const entriesWithState = await getFrequentEntriesWithState();
+    if ($('#wb-frequent-entries-list', parentDoc).length) {
+      $('#wb-frequent-entries-list', parentDoc).html(
+        renderFrequentEntries(entriesWithState, themeColors, { variant: 'desktop' }),
+      );
+    }
+    if ($('#wb-mobile-frequent-list', parentDoc).length) {
+      $('#wb-mobile-frequent-list', parentDoc).html(
+        renderFrequentEntries(entriesWithState, themeColors, { variant: 'mobile' }),
+      );
+    }
+  }
+
+  function getEntryDetailAnchorRect() {
+    const $frequentPanel = $('#wb-frequent-entries-panel', parentDoc);
+    if ($frequentPanel.length) return $frequentPanel[0].getBoundingClientRect();
+    const $simpleMenu = $('#worldbook-switcher-simple-menu', parentDoc);
+    if ($simpleMenu.length) return $simpleMenu[0].getBoundingClientRect();
+    return null;
+  }
+
+  function getEntryDetailPanelLayout() {
+    const anchorRect = getEntryDetailAnchorRect();
+    const viewportWidth = parentDoc.defaultView?.innerWidth || window.innerWidth || 1280;
+    const width = 340;
+    const top = anchorRect?.top ?? 100;
+    const height = Math.max(340, Math.round(anchorRect?.height ?? 400));
+    const preferredLeft = (anchorRect?.right ?? 100) + 10;
+    const maxLeft = Math.max(8, viewportWidth - width - 8);
+    return { top, left: Math.min(preferredLeft, maxLeft), width, height };
+  }
+
+  function repositionEntryDetailPanel() {
+    const $panel = $('#wb-entry-detail-panel', parentDoc);
+    if (!$panel.length) return;
+    const layout = getEntryDetailPanelLayout();
+    $panel.css({
+      top: `${layout.top}px`,
+      left: `${layout.left}px`,
+      width: `${layout.width}px`,
+      height: `${layout.height}px`,
+      maxHeight: `${layout.height}px`,
+    });
+  }
+
+  async function getEntryDetailPayload(worldbookName, uid) {
+    const targetUid = parseInt(uid, 10);
+    const entries =
+      worldbookName === currentState.selectedWorldbook && currentState.entries.length
+        ? currentState.entries
+        : await getWorldbookEntries(worldbookName);
+    const entry = entries.find(item => item.uid === targetUid);
+    if (!entry) {
+      console.error('[WorldbookSwitcher] 未找到条目详情:', worldbookName, targetUid);
+      return null;
+    }
+    return { entry, targetUid };
+  }
+
+  async function refreshOpenEntryDetailContexts(worldbookName, targetUid) {
+    const $panel = $('#wb-entry-detail-panel', parentDoc);
+    if (
+      $panel.length &&
+      String($panel.data('worldbook') || '') === worldbookName &&
+      parseInt($panel.data('uid'), 10) === targetUid
+    ) {
+      await openEntryDetailModal(worldbookName, targetUid);
+    }
+
+    if (
+      currentState.mobileDetailContext &&
+      currentState.mobileDetailContext.worldbookName === worldbookName &&
+      currentState.mobileDetailContext.uid === targetUid &&
+      $('#wb-mobile-detail-view', parentDoc).length
+    ) {
+      await openMobileEntryDetailView(worldbookName, targetUid);
+    }
+  }
+
+  function resolveFullscreenEditorContainer(containerOrSelector) {
+    if (containerOrSelector?.jquery) return containerOrSelector.first();
+    if (typeof containerOrSelector === 'string' && containerOrSelector) {
+      return $(containerOrSelector, parentDoc).first();
+    }
+    return $();
+  }
+
+  function getFullscreenEditorTextarea(containerOrSelector) {
+    return resolveFullscreenEditorContainer(containerOrSelector).find('.wb-entry-editor-textarea').get(0) || null;
+  }
+
+  function setFullscreenEditorFeedback(containerOrSelector, message, isError = false) {
+    const $container = resolveFullscreenEditorContainer(containerOrSelector);
+    if (!$container.length) return;
+    const $feedback = $container.find('.wb-entry-editor-feedback');
+    if (!$feedback.length) return;
+    if (!message) {
+      $feedback.text('').hide();
+      return;
+    }
+    $feedback
+      .text(message)
+      .css('color', isError ? '#FCA5A5' : 'var(--wb-editor-em, #9ac7ff)')
+      .show();
+  }
+
+  function updateFullscreenEditorDirtyState(containerOrSelector) {
+    const $container = resolveFullscreenEditorContainer(containerOrSelector);
+    if (!$container.length) return false;
+    const textarea = getFullscreenEditorTextarea($container);
+    if (!textarea) return false;
+    const initialContent = String($container.data('initialContent') ?? '');
+    const isDirty = textarea.value !== initialContent;
+    $container.data('dirty', isDirty);
+    $container.find('.wb-entry-editor-save').prop('disabled', !isDirty);
+    return isDirty;
+  }
+
+  function applyFullscreenEditorValue(containerOrSelector, nextValue, selectionStart, selectionEnd) {
+    const textarea = getFullscreenEditorTextarea(containerOrSelector);
+    if (!textarea) return false;
+    textarea.value = nextValue;
+    textarea.focus();
+    if (Number.isInteger(selectionStart) && Number.isInteger(selectionEnd)) {
+      textarea.setSelectionRange(selectionStart, selectionEnd);
+    }
+    const EventCtor = parentDoc.defaultView?.Event || Event;
+    textarea.dispatchEvent(new EventCtor('input', { bubbles: true }));
+    return true;
+  }
+
+  function replaceFullscreenEditorRange(containerOrSelector, start, end, replacement, selectionStart, selectionEnd) {
+    const textarea = getFullscreenEditorTextarea(containerOrSelector);
+    if (!textarea) return false;
+    const value = textarea.value;
+    const nextValue = value.slice(0, start) + replacement + value.slice(end);
+    return applyFullscreenEditorValue(containerOrSelector, nextValue, selectionStart, selectionEnd);
+  }
+
+  function wrapFullscreenEditorSelection(containerOrSelector, prefix, suffix, placeholder = '') {
+    const textarea = getFullscreenEditorTextarea(containerOrSelector);
+    if (!textarea) return false;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const selected = textarea.value.slice(start, end);
+    const content = selected || placeholder;
+    const replacement = `${prefix}${content}${suffix}`;
+    const nextStart = start + prefix.length;
+    const nextEnd = nextStart + content.length;
+    return replaceFullscreenEditorRange(containerOrSelector, start, end, replacement, nextStart, nextEnd);
+  }
+
+  function prefixFullscreenEditorLines(containerOrSelector, transformer) {
+    const textarea = getFullscreenEditorTextarea(containerOrSelector);
+    if (!textarea) return false;
+    const value = textarea.value;
+    let start = textarea.selectionStart;
+    let end = textarea.selectionEnd;
+    if (start === end) {
+      start = value.lastIndexOf('\n', Math.max(0, start - 1)) + 1;
+      end = value.indexOf('\n', end);
+      if (end === -1) end = value.length;
+    }
+    const segment = value.slice(start, end);
+    const replacement = segment
+      .split('\n')
+      .map((line, index) => transformer(line, index))
+      .join('\n');
+    return replaceFullscreenEditorRange(containerOrSelector, start, end, replacement, start, start + replacement.length);
+  }
+
+  function insertFullscreenTagTemplate(containerOrSelector, { multiline = false } = {}) {
+    const textarea = getFullscreenEditorTextarea(containerOrSelector);
+    if (!textarea) return false;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const selected = textarea.value.slice(start, end);
+    const replacement = multiline
+      ? `<tag>${selected ? `\n${selected}\n` : '\n\n'}</tag>`
+      : `<tag>${selected || ''}</tag>`;
+    const tagStart = start + 1;
+    const tagEnd = tagStart + 3;
+    return replaceFullscreenEditorRange(containerOrSelector, start, end, replacement, tagStart, tagEnd);
+  }
+
+  function runEditorExecCommand(textarea, command) {
+    if (!textarea) return false;
+    textarea.focus();
+    try {
+      return Boolean(parentDoc.execCommand && parentDoc.execCommand(command));
+    } catch {
+      return false;
+    }
+  }
+
+  function escapeRegExp(text) {
+    return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function isValidAngleTagName(text) {
+    return /^[A-Za-z][\w:-]*$/.test(String(text || '').trim());
+  }
+
+  function maskProtectedMarkdown(text) {
+    return String(text || '')
+      .replace(/```[\s\S]*?```/g, match => ' '.repeat(match.length))
+      .replace(/`[^`\n]*`/g, match => ' '.repeat(match.length));
+  }
+
+  function getAngleTagTokens(text, { skipProtected = false } = {}) {
+    const source = skipProtected ? maskProtectedMarkdown(text) : text;
+    const regex = /<\/?([A-Za-z][\w:-]*)(?:\s[^<>]*?)?\s*\/?>/g;
+    const tokens = [];
+    let match = null;
+    while ((match = regex.exec(source))) {
+      const full = String(text).slice(match.index, regex.lastIndex);
+      tokens.push({
+        full,
+        name: match[1],
+        start: match.index,
+        end: regex.lastIndex,
+        isClosing: full.startsWith('</'),
+        isSelfClosing: /\/\s*>$/.test(full),
+      });
+    }
+    return tokens;
+  }
+
+  function autoCloseAngleTags(text) {
+    const tokens = getAngleTagTokens(text, { skipProtected: true });
+    const parts = [];
+    const stack = [];
+    let cursor = 0;
+    let inserted = 0;
+
+    for (const token of tokens) {
+      parts.push(text.slice(cursor, token.start));
+      cursor = token.end;
+
+      if (token.isSelfClosing) {
+        parts.push(token.full);
+        continue;
+      }
+      if (!token.isClosing) {
+        parts.push(token.full);
+        stack.push(token.name);
+        continue;
+      }
+      if (!stack.length) {
+        parts.push(token.full);
+        continue;
+      }
+      if (stack[stack.length - 1] === token.name) {
+        parts.push(token.full);
+        stack.pop();
+        continue;
+      }
+      const matchIndex = stack.lastIndexOf(token.name);
+      if (matchIndex === -1) {
+        parts.push(token.full);
+        continue;
+      }
+      while (stack.length - 1 > matchIndex) {
+        parts.push(`</${stack.pop()}>`);
+        inserted += 1;
+      }
+      parts.push(token.full);
+      stack.pop();
+    }
+
+    parts.push(text.slice(cursor));
+    while (stack.length) {
+      parts.push(`</${stack.pop()}>`);
+      inserted += 1;
+    }
+    return { text: parts.join(''), inserted };
+  }
+
+  function extractPairedAngleTagNames(text) {
+    const stack = [];
+    const found = new Set();
+    for (const token of getAngleTagTokens(text, { skipProtected: true })) {
+      if (token.isSelfClosing) continue;
+      if (!token.isClosing) {
+        stack.push(token.name);
+        continue;
+      }
+      const matchIndex = stack.lastIndexOf(token.name);
+      if (matchIndex === -1) continue;
+      found.add(token.name);
+      stack.length = matchIndex;
+    }
+    return Array.from(found);
+  }
+
+  function renamePairedAngleTags(text, oldTagName, newTagName) {
+    if (!isValidAngleTagName(oldTagName) || !isValidAngleTagName(newTagName) || oldTagName === newTagName) {
+      return { text, changed: false };
+    }
+    const tokens = getAngleTagTokens(text, { skipProtected: true });
+    const openStartRegex = new RegExp(`^<\\s*${escapeRegExp(oldTagName)}(?=(\\s|>))`);
+    let changed = false;
+    const parts = [];
+    let cursor = 0;
+
+    for (const token of tokens) {
+      parts.push(text.slice(cursor, token.start));
+      cursor = token.end;
+
+      if (token.name !== oldTagName || token.isSelfClosing) {
+        parts.push(token.full);
+        continue;
+      }
+
+      if (token.isClosing) {
+        changed = true;
+        parts.push(`</${newTagName}>`);
+        continue;
+      }
+
+      if (openStartRegex.test(token.full)) {
+        changed = true;
+        parts.push(token.full.replace(openStartRegex, `<${newTagName}`));
+      } else {
+        parts.push(token.full);
+      }
+    }
+
+    parts.push(text.slice(cursor));
+    return { text: parts.join(''), changed };
+  }
+
+  function renderFullscreenToolbarButton(action, label, icon = '') {
+    return `
+      <button type="button" class="wb-entry-editor-tool-btn" data-action="${action}" title="${escapeAttr(label)}">
+        ${icon ? `<i class="${icon}"></i>` : `<span>${escapeHtml(label)}</span>`}
+      </button>
+    `;
+  }
+
+  function renderFullscreenEditorView(entry, worldbookName, themeColors) {
+    const entryTitle = getEntryDisplayName(entry, 60);
+    return `
+      <style>
+        #wb-entry-fullscreen-editor {
+          --wb-editor-bg: var(--SmartThemeBlurTintColor, rgba(20, 24, 32, 0.96));
+          --wb-editor-text: var(--SmartThemeBodyColor, #f5f7fa);
+          --wb-editor-em: var(--SmartThemeEmColor, #9ac7ff);
+          --wb-editor-border: var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.28));
+          --wb-editor-input-bg: ${themeColors.inputBg};
+          --wb-editor-input-text: ${themeColors.inputText};
+          --wb-editor-muted: ${themeColors.secondaryText};
+          position: fixed; inset: 0; z-index: 10030; background: rgba(9, 11, 16, 0.72); backdrop-filter: blur(6px); color: var(--wb-editor-text);
+        }
+        #wb-entry-fullscreen-editor .wb-entry-editor-shell { width: 100%; height: 100%; display: flex; flex-direction: column; background: var(--wb-editor-bg); }
+        #wb-entry-fullscreen-editor .wb-entry-editor-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px 12px; border-bottom: 1px solid var(--wb-editor-border); }
+        #wb-entry-fullscreen-editor .wb-entry-editor-meta { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-title { font-size: 1.05em; font-weight: 700; color: var(--wb-editor-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-subtitle { font-size: 0.82em; color: var(--wb-editor-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-actions { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-action-btn,
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog-btn { height: 38px; padding: 0 14px; border-radius: 10px; border: 1px solid var(--wb-editor-border); background: transparent; color: var(--wb-editor-text); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-action-btn--primary,
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog-btn--primary { background: rgba(59, 130, 246, 0.28); border-color: rgba(96, 165, 250, 0.7); color: #f8fbff; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-action-btn:disabled { opacity: 0.45; cursor: default; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-action-btn:focus-visible,
+        #wb-entry-fullscreen-editor .wb-entry-editor-tool-btn:focus-visible,
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog-btn:focus-visible,
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog-input:focus,
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog-select:focus,
+        #wb-entry-fullscreen-editor .wb-entry-editor-textarea:focus { outline: none; border-color: var(--wb-editor-em); box-shadow: 0 0 0 3px rgba(154, 199, 255, 0.22); }
+        #wb-entry-fullscreen-editor .wb-entry-editor-toolbar { display: flex; flex-wrap: wrap; gap: 10px; padding: 12px 18px; border-bottom: 1px solid var(--wb-editor-border); }
+        #wb-entry-fullscreen-editor .wb-entry-editor-toolbar-group { display: inline-flex; flex-wrap: wrap; gap: 6px; padding: 6px; border-radius: 12px; border: 1px solid var(--wb-editor-border); background: rgba(15, 23, 42, 0.22); }
+        #wb-entry-fullscreen-editor .wb-entry-editor-tool-btn { min-width: 34px; height: 34px; padding: 0 10px; border-radius: 9px; border: 1px solid transparent; background: transparent; color: var(--wb-editor-text); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 6px; font-size: 0.88em; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-tool-btn:hover,
+        #wb-entry-fullscreen-editor .wb-entry-editor-action-btn:hover,
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog-btn:hover { background: rgba(255, 255, 255, 0.08); }
+        #wb-entry-fullscreen-editor .wb-entry-editor-body { flex: 1 1 auto; min-height: 0; padding: 16px 18px 12px; display: flex; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-textarea { width: 100%; height: 100%; min-height: 0; resize: none; box-sizing: border-box; padding: 16px 18px; border-radius: 14px; border: 1px solid var(--wb-editor-border); background: var(--wb-editor-input-bg); color: var(--wb-editor-input-text); font-size: 1em; line-height: 1.65; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-textarea::placeholder,
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog-input::placeholder { color: rgba(245, 247, 250, 0.66); }
+        #wb-entry-fullscreen-editor .wb-entry-editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 18px 14px; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-feedback { min-height: 20px; font-size: 0.84em; color: var(--wb-editor-em); display: none; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog-backdrop { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(6, 8, 12, 0.52); padding: 20px; }
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog { width: min(420px, 100%); display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 14px; border: 1px solid var(--wb-editor-border); background: var(--wb-editor-bg); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35); }
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog-title { font-size: 0.96em; font-weight: 700; color: var(--wb-editor-text); }
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog-select,
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog-input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--wb-editor-border); background: var(--wb-editor-input-bg); color: var(--wb-editor-input-text); }
+        #wb-entry-fullscreen-editor .wb-entry-editor-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+      </style>
+      <div class="wb-entry-editor-shell">
+        <div class="wb-entry-editor-header">
+          <div class="wb-entry-editor-meta"><div class="wb-entry-editor-title">${escapeHtml(entryTitle)}</div><div class="wb-entry-editor-subtitle">${escapeHtml(worldbookName)}</div></div>
+          <div class="wb-entry-editor-actions">
+            <button type="button" class="wb-entry-editor-action-btn wb-entry-editor-save wb-entry-editor-action-btn--primary" disabled><i class="fa-solid fa-floppy-disk"></i><span>保存</span></button>
+            <button type="button" class="wb-entry-editor-action-btn wb-entry-editor-close"><i class="fa-solid fa-times"></i><span>关闭</span></button>
+          </div>
+        </div>
+        <div class="wb-entry-editor-toolbar">
+          <div class="wb-entry-editor-toolbar-group">
+            ${renderFullscreenToolbarButton('undo', '撤销', 'fa-solid fa-rotate-left')}
+            ${renderFullscreenToolbarButton('redo', '重做', 'fa-solid fa-rotate-right')}
+            ${renderFullscreenToolbarButton('copy', '复制', 'fa-solid fa-copy')}
+            ${renderFullscreenToolbarButton('cut', '剪切', 'fa-solid fa-scissors')}
+            ${renderFullscreenToolbarButton('select-all', '全选', 'fa-solid fa-i-cursor')}
+            ${renderFullscreenToolbarButton('find', '查找', 'fa-solid fa-magnifying-glass')}
+            ${renderFullscreenToolbarButton('remove-blank-lines', '去空行', 'fa-solid fa-filter-circle-xmark')}
+          </div>
+          <div class="wb-entry-editor-toolbar-group">
+            ${renderFullscreenToolbarButton('heading', '标题', 'fa-solid fa-heading')}
+            ${renderFullscreenToolbarButton('bold', '加粗', 'fa-solid fa-bold')}
+            ${renderFullscreenToolbarButton('italic', '斜体', 'fa-solid fa-italic')}
+            ${renderFullscreenToolbarButton('unordered-list', '无序列表', 'fa-solid fa-list-ul')}
+            ${renderFullscreenToolbarButton('ordered-list', '有序列表', 'fa-solid fa-list-ol')}
+            ${renderFullscreenToolbarButton('quote', '引用', 'fa-solid fa-quote-left')}
+            ${renderFullscreenToolbarButton('inline-code', '行内代码', 'fa-solid fa-code')}
+            ${renderFullscreenToolbarButton('code-block', '代码块', 'fa-solid fa-file-code')}
+            ${renderFullscreenToolbarButton('horizontal-rule', '分隔线', 'fa-solid fa-minus')}
+            ${renderFullscreenToolbarButton('link', '链接', 'fa-solid fa-link')}
+          </div>
+          <div class="wb-entry-editor-toolbar-group">
+            ${renderFullscreenToolbarButton('tag-inline', '<>')}
+            ${renderFullscreenToolbarButton('tag-block', '</>')}
+            ${renderFullscreenToolbarButton('auto-close-tags', '自动闭合', 'fa-solid fa-wand-magic-sparkles')}
+            ${renderFullscreenToolbarButton('rename-tags', '标签改名', 'fa-solid fa-i-cursor')}
+          </div>
+        </div>
+        <div class="wb-entry-editor-body"><textarea class="wb-entry-editor-textarea" spellcheck="false">${escapeHtml(entry.content || '')}</textarea></div>
+        <div class="wb-entry-editor-footer"><div class="wb-entry-editor-feedback"></div></div>
+        <div class="wb-entry-editor-dialog-backdrop">
+          <div class="wb-entry-editor-dialog">
+            <div class="wb-entry-editor-dialog-title">标签改名</div>
+            <select class="wb-entry-editor-dialog-select"></select>
+            <input class="wb-entry-editor-dialog-input" type="text" placeholder="输入新的标签名">
+            <div class="wb-entry-editor-dialog-actions">
+              <button type="button" class="wb-entry-editor-dialog-btn wb-entry-editor-dialog-cancel">取消</button>
+              <button type="button" class="wb-entry-editor-dialog-btn wb-entry-editor-dialog-btn--primary wb-entry-editor-dialog-confirm">应用</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function showTagRenameDialog(containerOrSelector, tagNames) {
+    const $container = resolveFullscreenEditorContainer(containerOrSelector);
+    if (!$container.length) return;
+    const optionsHtml = tagNames
+      .map(name => `<option value="${escapeAttr(name)}">&lt;${escapeHtml(name)}&gt;&lt;/${escapeHtml(name)}&gt;</option>`)
+      .join('');
+    $container.find('.wb-entry-editor-dialog-select').html(optionsHtml);
+    $container.find('.wb-entry-editor-dialog-input').val('');
+    $container.find('.wb-entry-editor-dialog-backdrop').css('display', 'flex');
+    window.setTimeout(() => $container.find('.wb-entry-editor-dialog-input').trigger('focus'), 0);
+  }
+
+  function hideTagRenameDialog(containerOrSelector) {
+    resolveFullscreenEditorContainer(containerOrSelector).find('.wb-entry-editor-dialog-backdrop').hide();
+  }
+
+  function closeFullscreenEntryEditor({ force = false } = {}) {
+    const $editor = $('#wb-entry-fullscreen-editor', parentDoc);
+    if (!$editor.length) return true;
+    const isDirty = Boolean($editor.data('dirty'));
+    const view = parentDoc.defaultView || window;
+    if (!force && isDirty && !view.confirm('正文内容尚未保存，确定关闭吗？')) {
+      return false;
+    }
+    $editor.remove();
+    currentState.fullscreenEditorContext = null;
+    return true;
+  }
+
+  async function openFullscreenEntryEditor(worldbookName, uid, sourceMode = 'desktop') {
+    const targetUid = parseInt(uid, 10);
+    const $existing = $('#wb-entry-fullscreen-editor', parentDoc);
+    if ($existing.length) {
+      const sameEntry =
+        String($existing.data('worldbook') || '') === worldbookName &&
+        parseInt($existing.data('uid'), 10) === targetUid;
+      if (sameEntry) {
+        getFullscreenEditorTextarea($existing)?.focus();
+        return;
+      }
+      if (!closeFullscreenEntryEditor()) return;
+    }
+
+    const payload = await getEntryDetailPayload(worldbookName, targetUid);
+    if (!payload) return;
+    const themeColors = getThemeColors();
+    const editorHtml = `
+      <div id="wb-entry-fullscreen-editor" ${buildDataAttrs({ worldbook: worldbookName, uid: targetUid })}>
+        ${renderFullscreenEditorView(payload.entry, worldbookName, themeColors)}
+      </div>
+    `;
+
+    $('body', parentDoc).append(editorHtml);
+    const $editor = $('#wb-entry-fullscreen-editor', parentDoc);
+    $editor.data('initialContent', String(payload.entry.content || ''));
+    $editor.data('dirty', false);
+    currentState.fullscreenEditorContext = {
+      worldbookName,
+      uid: targetUid,
+      initialContent: String(payload.entry.content || ''),
+      sourceMode,
+    };
+    bindFullscreenEntryEditor($editor, { worldbookName, targetUid, onClose: closeFullscreenEntryEditor });
+    getFullscreenEditorTextarea($editor)?.focus();
+  }
+
+  async function handleFullscreenEditorToolbarAction($container, action) {
+    const textarea = getFullscreenEditorTextarea($container);
+    if (!textarea) return;
+
+    if (action === 'undo' || action === 'redo') {
+      if (!runEditorExecCommand(textarea, action)) {
+        setFullscreenEditorFeedback($container, `${action === 'undo' ? '撤销' : '重做'}当前不可用`, true);
+      }
+      return;
+    }
+
+    if (action === 'copy' || action === 'cut') {
+      const commandWorked = runEditorExecCommand(textarea, action);
+      if (commandWorked) return;
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const selectedText = textarea.value.slice(start, end);
+      if (!selectedText) {
+        setFullscreenEditorFeedback($container, `请先选择要${action === 'copy' ? '复制' : '剪切'}的内容`, true);
+        return;
+      }
+      try {
+        await (navigator.clipboard?.writeText?.(selectedText) ?? Promise.reject(new Error('clipboard unavailable')));
+        if (action === 'cut') {
+          replaceFullscreenEditorRange($container, start, end, '', start, start);
+        }
+        setFullscreenEditorFeedback($container, `已${action === 'copy' ? '复制' : '剪切'}选中文本`);
+      } catch {
+        setFullscreenEditorFeedback($container, `${action === 'copy' ? '复制' : '剪切'}失败，请检查浏览器权限`, true);
+      }
+      return;
+    }
+
+    if (action === 'select-all') {
+      textarea.focus();
+      textarea.setSelectionRange(0, textarea.value.length);
+      return;
+    }
+
+    if (action === 'find') {
+      const view = parentDoc.defaultView || window;
+      const keyword = view.prompt('查找内容', textarea.value.slice(textarea.selectionStart, textarea.selectionEnd) || '');
+      if (!keyword) return;
+      let matchIndex = textarea.value.indexOf(keyword, textarea.selectionEnd);
+      if (matchIndex === -1) matchIndex = textarea.value.indexOf(keyword);
+      if (matchIndex === -1) {
+        setFullscreenEditorFeedback($container, '未找到匹配内容', true);
+        return;
+      }
+      textarea.focus();
+      textarea.setSelectionRange(matchIndex, matchIndex + keyword.length);
+      return;
+    }
+
+    if (action === 'remove-blank-lines') {
+      applyFullscreenEditorValue(
+        $container,
+        textarea.value.split(/\r?\n/).filter(line => line.trim() !== '').join('\n'),
+        0,
+        0,
+      );
+      setFullscreenEditorFeedback($container, '已移除空行');
+      return;
+    }
+
+    const lineActions = {
+      heading: line => `# ${String(line).replace(/^#+\s*/, '')}`,
+      'unordered-list': line => (line.trim() ? `- ${line.replace(/^[-*+]\s+/, '')}` : '- '),
+      'ordered-list': (line, index) => `${index + 1}. ${line.replace(/^\d+\.\s+/, '')}`,
+      quote: line => `> ${line.replace(/^>\s?/, '')}`,
+    };
+    if (lineActions[action]) {
+      prefixFullscreenEditorLines($container, lineActions[action]);
+      return;
+    }
+
+    const wrapActions = {
+      bold: ['**', '**', '文本'],
+      italic: ['*', '*', '文本'],
+      'inline-code': ['`', '`', 'code'],
+    };
+    if (wrapActions[action]) {
+      wrapFullscreenEditorSelection($container, ...wrapActions[action]);
+      return;
+    }
+
+    if (action === 'code-block') {
+      const selected = textarea.value.slice(textarea.selectionStart, textarea.selectionEnd);
+      const replacement = `\`\`\`\n${selected || ''}\n\`\`\``;
+      const start = textarea.selectionStart;
+      replaceFullscreenEditorRange($container, start, textarea.selectionEnd, replacement, start + 4, start + 4 + selected.length);
+      return;
+    }
+
+    if (action === 'horizontal-rule') {
+      const start = textarea.selectionStart;
+      replaceFullscreenEditorRange($container, start, textarea.selectionEnd, '\n---\n', start + 5, start + 5);
+      return;
+    }
+
+    if (action === 'link') {
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const selected = textarea.value.slice(start, end) || '文本';
+      const replacement = `[${selected}](url)`;
+      const urlStart = start + replacement.length - 4;
+      replaceFullscreenEditorRange($container, start, end, replacement, urlStart, urlStart + 3);
+      return;
+    }
+
+    if (action === 'tag-inline' || action === 'tag-block') {
+      insertFullscreenTagTemplate($container, { multiline: action === 'tag-block' });
+      return;
+    }
+
+    if (action === 'auto-close-tags') {
+      const { text, inserted } = autoCloseAngleTags(textarea.value);
+      if (!inserted || text === textarea.value) {
+        setFullscreenEditorFeedback($container, '未发现可补全标签');
+        return;
+      }
+      applyFullscreenEditorValue($container, text, textarea.selectionStart, textarea.selectionEnd);
+      setFullscreenEditorFeedback($container, `已补全 ${inserted} 处标签`);
+      return;
+    }
+
+    if (action === 'rename-tags') {
+      const tagNames = extractPairedAngleTagNames(textarea.value);
+      if (!tagNames.length) {
+        setFullscreenEditorFeedback($container, '未找到可改名标签', true);
+        return;
+      }
+      showTagRenameDialog($container, tagNames);
+    }
+  }
+
+  function bindFullscreenEntryEditor($container, { worldbookName, targetUid, onClose }) {
+    if (!$container.length) return;
+    $container.off('.wbentryeditor');
+
+    const saveContent = async () => {
+      if ($container.data('saving')) return;
+      const textarea = getFullscreenEditorTextarea($container);
+      if (!textarea) return;
+      const nextContent = textarea.value;
+      const initialContent = String($container.data('initialContent') ?? '');
+      if (nextContent === initialContent) {
+        setFullscreenEditorFeedback($container, '当前没有需要保存的改动');
+        return;
+      }
+
+      $container.data('saving', true);
+      $container.find('.wb-entry-editor-save').prop('disabled', true);
+      setFullscreenEditorFeedback($container, '保存中...');
+      try {
+        const latestEntries = await getWorldbookEntries(worldbookName);
+        const targetEntry = latestEntries.find(item => item.uid === targetUid);
+        if (!targetEntry) {
+          setFullscreenEditorFeedback($container, '条目不存在或已被移除', true);
+          return;
+        }
+        targetEntry.content = nextContent;
+        const updated = await updateWorldbookEntries(worldbookName, latestEntries);
+        if (!updated) {
+          setFullscreenEditorFeedback($container, '保存失败，请稍后重试', true);
+          return;
+        }
+        if (worldbookName === currentState.selectedWorldbook) {
+          currentState.entries = latestEntries;
+        }
+        $container.data('initialContent', nextContent);
+        if (currentState.fullscreenEditorContext) {
+          currentState.fullscreenEditorContext.initialContent = nextContent;
+        }
+        updateFullscreenEditorDirtyState($container);
+        await refreshCurrentWorldbookViews(worldbookName);
+        await refreshFrequentEntryViews();
+        await refreshOpenEntryDetailContexts(worldbookName, targetUid);
+        setFullscreenEditorFeedback($container, '正文已保存');
+      } catch (error) {
+        console.error('[WorldbookSwitcher] 保存条目正文失败:', error);
+        setFullscreenEditorFeedback($container, '保存失败，请检查控制台日志', true);
+      } finally {
+        $container.removeData('saving');
+        updateFullscreenEditorDirtyState($container);
+      }
+    };
+
+    $container.on('input.wbentryeditor', '.wb-entry-editor-textarea', function() {
+      updateFullscreenEditorDirtyState($container);
+      setFullscreenEditorFeedback($container, '');
+    });
+    $container.on('click.wbentryeditor', '.wb-entry-editor-close', function(e) { e.stopPropagation(); onClose?.(); });
+    $container.on('click.wbentryeditor', '.wb-entry-editor-save', function(e) { e.stopPropagation(); void saveContent(); });
+    $container.on('click.wbentryeditor', '.wb-entry-editor-tool-btn', function(e) {
+      e.stopPropagation();
+      void handleFullscreenEditorToolbarAction($container, String($(this).data('action') || ''));
+    });
+    $container.on('click.wbentryeditor', '.wb-entry-editor-dialog-cancel', function(e) { e.stopPropagation(); hideTagRenameDialog($container); });
+    $container.on('click.wbentryeditor', '.wb-entry-editor-dialog-confirm', function(e) {
+      e.stopPropagation();
+      const oldTagName = String($container.find('.wb-entry-editor-dialog-select').val() || '').trim();
+      const newTagName = String($container.find('.wb-entry-editor-dialog-input').val() || '').trim();
+      if (!isValidAngleTagName(newTagName)) {
+        setFullscreenEditorFeedback($container, '请输入有效的标签名', true);
+        return;
+      }
+      const textarea = getFullscreenEditorTextarea($container);
+      if (!textarea) return;
+      const { text, changed } = renamePairedAngleTags(textarea.value, oldTagName, newTagName);
+      if (!changed) {
+        setFullscreenEditorFeedback($container, '未找到可改写的标签结构', true);
+        return;
+      }
+      applyFullscreenEditorValue($container, text, textarea.selectionStart, textarea.selectionEnd);
+      hideTagRenameDialog($container);
+      setFullscreenEditorFeedback($container, `已将 <${oldTagName}></${oldTagName}> 改为 <${newTagName}></${newTagName}>`);
+    });
+    $container.on('keydown.wbentryeditor', '.wb-entry-editor-dialog-input', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        $container.find('.wb-entry-editor-dialog-confirm').trigger('click');
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        hideTagRenameDialog($container);
+      }
+    });
+    $container.on('click.wbentryeditor', '.wb-entry-editor-dialog-backdrop', function(e) {
+      if (e.target === this) hideTagRenameDialog($container);
+    });
+    $container.on('keydown.wbentryeditor', function(e) {
+      if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 's') {
+        e.preventDefault();
+        void saveContent();
+      } else if (e.key === 'Escape' && !$(e.target).closest('.wb-entry-editor-dialog').length) {
+        e.preventDefault();
+        onClose?.();
+      }
+    });
+  }
+
+  function renderEntryDetailView(entry, worldbookName, themeColors, { mode = 'desktop' } = {}) {
+    const strategyType = entry.strategy?.type || 'constant';
+    const positionType = entry.position?.type || 'before_character_definition';
+    const depthValue = Number.isFinite(entry.position?.depth) ? entry.position.depth : 0;
+    const containerSelector = mode === 'desktop' ? '#wb-entry-detail-panel' : '#wb-mobile-detail-view';
+    const entryTitle = getEntryDisplayName(entry, 30);
+    return `
+      <style>
+        ${containerSelector} {
+          --wb-detail-text: var(--SmartThemeBodyColor, #f5f7fa);
+          --wb-detail-em: var(--SmartThemeEmColor, #9ac7ff);
+          --wb-detail-bg: var(--SmartThemeBlurTintColor, rgba(20, 24, 32, 0.92));
+          --wb-detail-border: var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.28));
+          --wb-detail-input-bg: ${themeColors.inputBg};
+          --wb-detail-input-text: ${themeColors.inputText};
+          --wb-detail-muted: ${themeColors.secondaryText};
+        }
+        ${containerSelector} .wb-entry-detail-shell {
+          height: 100%;
+          display: flex;
+          flex-direction: column;
+          min-height: 0;
+          background: ${mode === 'desktop' ? 'var(--wb-detail-bg)' : 'transparent'};
+          color: var(--wb-detail-text);
+          border: ${mode === 'desktop' ? '1px solid var(--wb-detail-border)' : 'none'};
+          border-radius: ${mode === 'desktop' ? '10px' : '0'};
+          box-shadow: ${mode === 'desktop' ? '0 8px 24px rgba(0, 0, 0, 0.35)' : 'none'};
+          overflow: hidden;
+        }
+        ${containerSelector} .wb-entry-detail-body {
+          flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px;
+        }
+        ${containerSelector} .wb-entry-detail-content {
+          flex: 1 1 auto;
+          min-height: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        ${containerSelector} .wb-entry-detail-label {
+          display: block; margin-bottom: 6px; color: var(--wb-detail-text); font-size: 0.84em; font-weight: 600;
+        }
+        ${containerSelector} .wb-entry-detail-heading {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+          margin-bottom: 6px;
+        }
+        ${containerSelector} .wb-entry-detail-heading .wb-entry-detail-label {
+          margin-bottom: 0;
+          flex: 1;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        ${containerSelector} .wb-entry-detail-heading-actions {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          flex-shrink: 0;
+        }
+        ${containerSelector} .wb-entry-detail-title-action {
+          width: 28px;
+          height: 28px;
+          border-radius: 7px;
+          border: 1px solid var(--wb-detail-border);
+          background: transparent;
+          color: var(--wb-detail-text);
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          cursor: pointer;
+          flex-shrink: 0;
+        }
+        ${containerSelector} .wb-entry-detail-title-action:focus-visible {
+          outline: none;
+          border-color: var(--wb-detail-em);
+          box-shadow: 0 0 0 3px rgba(154, 199, 255, 0.22);
+        }
+        ${containerSelector} .wb-entry-detail-input {
+          width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--wb-detail-border);
+          background: var(--wb-detail-input-bg); color: var(--wb-detail-input-text); font-size: 0.9em; outline: none;
+          transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+        }
+        ${containerSelector} .wb-entry-detail-input::placeholder { color: rgba(245, 247, 250, 0.66); }
+        ${containerSelector} .wb-entry-detail-input:focus { border-color: var(--wb-detail-em); box-shadow: 0 0 0 3px rgba(154, 199, 255, 0.22); }
+        ${containerSelector} .wb-entry-detail-input--compact { height: 40px; padding: 8px 12px; }
+        ${containerSelector} textarea.wb-entry-detail-input { flex: 1 1 auto; min-height: ${mode === 'desktop' ? '220px' : '160px'}; height: 100%; resize: none; line-height: 1.55; }
+        ${containerSelector} .wb-entry-detail-toolbar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+        ${containerSelector} .wb-entry-detail-field { min-width: 0; display: flex; align-items: center; gap: 8px; }
+        ${containerSelector} .wb-entry-detail-inline-label { flex-shrink: 0; color: var(--wb-detail-text); font-size: 0.78em; font-weight: 600; white-space: nowrap; }
+        ${containerSelector} .wb-entry-detail-field--depth { justify-content: flex-end; }
+        ${containerSelector} .wb-entry-detail-field--depth .wb-entry-detail-input { width: 72px; text-align: center; }
+        ${containerSelector} .wb-entry-detail-strategy-group {
+          display: inline-flex; align-items: center; gap: 6px; padding: 4px; border-radius: 12px;
+          border: 1px solid var(--wb-detail-border); background: rgba(15, 23, 42, 0.22);
+        }
+        ${containerSelector} .wb-entry-detail-strategy-btn {
+          width: 32px; height: 32px; border-radius: 9px; border: 1px solid transparent; background: transparent;
+          color: rgba(245, 247, 250, 0.72); display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+        }
+        ${containerSelector} .wb-entry-detail-strategy-btn[data-active='true'] {
+          color: var(--wb-strategy-color); border-color: var(--wb-strategy-color); background: rgba(255, 255, 255, 0.08);
+        }
+        ${containerSelector} .wb-entry-detail-strategy-btn:focus-visible {
+          outline: none; border-color: var(--wb-detail-em); box-shadow: 0 0 0 3px rgba(154, 199, 255, 0.22);
+        }
+        ${containerSelector} .wb-entry-detail-feedback { min-height: 18px; font-size: 0.82em; display: none; }
+      </style>
+      <div class="wb-entry-detail-shell">
+        <div class="wb-entry-detail-body">
+          <div class="wb-entry-detail-content">
+            <div class="wb-entry-detail-heading">
+              <label class="wb-entry-detail-label">${escapeHtml(entryTitle)}</label>
+              <div class="wb-entry-detail-heading-actions">
+                <button class="wb-entry-detail-title-action wb-entry-detail-expand" title="大窗口">
+                  <i class="fa-solid fa-up-right-and-down-left-from-center"></i>
+                </button>
+                <button class="wb-entry-detail-title-action wb-entry-detail-${mode === 'desktop' ? 'close' : 'back'}" title="${mode === 'desktop' ? '关闭' : '返回'}">
+                  <i class="fa-solid fa-${mode === 'desktop' ? 'times' : 'arrow-left'}"></i>
+                </button>
+              </div>
+            </div>
+            <textarea class="wb-entry-detail-input" readonly spellcheck="false">${escapeHtml(entry.content || '')}</textarea>
+          </div>
+          <div class="wb-entry-detail-toolbar">
+            <div class="wb-entry-detail-field">
+              <input class="wb-entry-detail-strategy-input" type="hidden" value="${escapeAttr(strategyType)}">
+              <div class="wb-entry-detail-strategy-group" role="group" aria-label="触发策略">${renderEntryStrategyButtons(strategyType)}</div>
+            </div>
+            <div class="wb-entry-detail-field">
+              <select class="wb-entry-detail-input wb-entry-detail-input--compact wb-entry-detail-position-select" title="插入位置">
+                ${ENTRY_POSITION_OPTIONS.map(option => `<option value="${option.value}" ${option.value === positionType ? 'selected' : ''}>${option.label}</option>`).join('')}
+              </select>
+            </div>
+            <div class="wb-entry-detail-field wb-entry-detail-field--depth wb-entry-detail-depth-row" style="display: none;">
+              <input class="wb-entry-detail-input wb-entry-detail-input--compact wb-entry-detail-depth-input" type="number" step="1" inputmode="numeric" title="深度" value="${escapeAttr(depthValue)}">
+            </div>
+          </div>
+          <div class="wb-entry-detail-feedback"></div>
+        </div>
+      </div>
+    `;
+  }
+
+  function bindEntryDetailEditor($container, { worldbookName, targetUid, mode = 'desktop', onClose }) {
+    if (!$container.length) return;
+    $container.off('.wbentrydetail');
+    updateEntryDetailStrategyState($container);
+    updateEntryDetailDepthState($container);
+
+    const persistChanges = async () => {
+      if ($container.data('wbEntryDetailSaving')) {
+        $container.data('wbEntryDetailPending', true);
+        return;
+      }
+
+      const nextStrategyType = String($container.find('.wb-entry-detail-strategy-input').val() || '');
+      const nextPositionType = String($container.find('.wb-entry-detail-position-select').val() || '');
+      const nextDepthRaw = String($container.find('.wb-entry-detail-depth-input').val() || '').trim();
+
+      if (nextPositionType === 'at_depth') {
+        const nextDepth = Number.parseInt(nextDepthRaw, 10);
+        if (!Number.isInteger(nextDepth)) {
+          setEntryDetailFeedback($container, '请输入有效的深度值。', true);
+          return;
+        }
+      }
+
+      $container.data('wbEntryDetailSaving', true);
+      try {
+        setEntryDetailFeedback($container, '保存中...');
+        const latestEntries = await getWorldbookEntries(worldbookName);
+        const targetEntry = latestEntries.find(item => item.uid === targetUid);
+        if (!targetEntry) {
+          setEntryDetailFeedback($container, '条目不存在或已被移除。', true);
+          return;
+        }
+
+        targetEntry.strategy = { ...(targetEntry.strategy || {}), type: nextStrategyType };
+        targetEntry.position = { ...(targetEntry.position || {}), type: nextPositionType };
+        if (nextPositionType === 'at_depth') {
+          targetEntry.position.depth = Number.parseInt(nextDepthRaw, 10);
+        }
+
+        const updated = await updateWorldbookEntries(worldbookName, latestEntries);
+        if (!updated) {
+          setEntryDetailFeedback($container, '保存失败，请稍后重试。', true);
+          return;
+        }
+
+        if (worldbookName === currentState.selectedWorldbook) {
+          currentState.entries = latestEntries;
+        }
+        await refreshCurrentWorldbookViews(worldbookName);
+        await refreshFrequentEntryViews();
+        setEntryDetailFeedback($container, mode === 'mobile' ? '已自动保存，返回列表后可继续切换其它条目。' : '已自动保存。');
+      } catch (error) {
+        console.error('[WorldbookSwitcher] 保存条目详情失败:', error);
+        setEntryDetailFeedback($container, '保存失败，请检查控制台日志。', true);
+      } finally {
+        $container.removeData('wbEntryDetailSaving');
+        const shouldPersistAgain = Boolean($container.data('wbEntryDetailPending'));
+        $container.removeData('wbEntryDetailPending');
+        if (shouldPersistAgain) {
+          void persistChanges();
+        }
+      }
+    };
+
+    $container.on('click.wbentrydetail', '.wb-entry-detail-close, .wb-entry-detail-cancel, .wb-entry-detail-back', function(e) {
+      e.stopPropagation();
+      onClose?.();
+    });
+    $container.on('click.wbentrydetail', '.wb-entry-detail-expand', function(e) {
+      e.stopPropagation();
+      void openFullscreenEntryEditor(worldbookName, targetUid, mode);
+    });
+    $container.on('click.wbentrydetail', '.wb-entry-detail-strategy-btn', function(e) {
+      e.stopPropagation();
+      updateEntryDetailStrategyState($container, $(this).attr('data-value'));
+      void persistChanges();
+    });
+    $container.on('change.wbentrydetail', '.wb-entry-detail-position-select', function() {
+      updateEntryDetailDepthState($container);
+      void persistChanges();
+    });
+    $container.on('change.wbentrydetail', '.wb-entry-detail-depth-input', function() {
+      void persistChanges();
+    });
+    $container.on('keydown.wbentrydetail', '.wb-entry-detail-depth-input', function(e) {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        $(this).trigger('change');
+        $(this).blur();
+      }
+    });
+  }
+
+  function closeMobileEntryDetailView() {
+    const restoreTab = currentState.mobileDetailContext?.tab ?? currentState.mobileActiveTab ?? 1;
+    currentState.mobileDetailContext = null;
+    $('#wb-mobile-detail-view', parentDoc).hide().empty();
+    $('#wb-mobile-panel-0, #wb-mobile-panel-1, #wb-mobile-panel-2', parentDoc).hide();
+    $(`#wb-mobile-panel-${restoreTab}`, parentDoc).css('display', 'flex');
+    currentState.mobileActiveTab = restoreTab;
+  }
+
+  async function openMobileEntryDetailView(worldbookName, uid) {
+    const payload = await getEntryDetailPayload(worldbookName, uid);
+    if (!payload) return;
+    const { entry, targetUid } = payload;
+    const $detailView = $('#wb-mobile-detail-view', parentDoc);
+    if (!$detailView.length) return;
+
+    currentState.mobileDetailContext = {
+      tab: currentState.mobileActiveTab ?? 1,
+      worldbookName,
+      uid: targetUid,
+    };
+
+    const themeColors = getThemeColors();
+    $('#wb-mobile-panel-0, #wb-mobile-panel-1, #wb-mobile-panel-2', parentDoc).hide();
+    $detailView.html(renderEntryDetailView(entry, worldbookName, themeColors, { mode: 'mobile' })).css('display', 'flex');
+    bindEntryDetailEditor($detailView, {
+      worldbookName,
+      targetUid,
+      mode: 'mobile',
+      onClose: closeMobileEntryDetailView,
+    });
+  }
+
+  async function openEntryDetailModal(worldbookName, uid) {
+    const payload = await getEntryDetailPayload(worldbookName, uid);
+    if (!payload) return;
+    const { entry, targetUid } = payload;
+    const themeColors = getThemeColors();
+    const layout = getEntryDetailPanelLayout();
+    const panelHtml = `
+      <div id="wb-entry-detail-panel" ${buildDataAttrs({ worldbook: worldbookName, uid: targetUid })} style="
+        position: fixed;
+        top: ${layout.top}px;
+        left: ${layout.left}px;
+        z-index: 10002;
+        width: ${layout.width}px;
+        height: ${layout.height}px;
+        max-height: ${layout.height}px;
+        color: ${themeColors.text};
+        animation: slideInRight 0.2s ease-out;
+      ">
+        <style>
+          @keyframes slideInRight {
+            from { transform: translateX(20px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+          }
+        </style>
+        ${renderEntryDetailView(entry, worldbookName, themeColors, { mode: 'desktop' })}
+      </div>
+    `;
+
+    const $existingPanel = $('#wb-entry-detail-panel', parentDoc);
+    if ($existingPanel.length) {
+      $existingPanel.replaceWith(panelHtml);
+    } else {
+      $('body', parentDoc).append(panelHtml);
+    }
+
+    const $panel = $('#wb-entry-detail-panel', parentDoc);
+    bindEntryDetailEditor($panel, {
+      worldbookName,
+      targetUid,
+      mode: 'desktop',
+      onClose: closeEntryDetailPanel,
+    });
+    repositionEntryDetailPanel();
+  }
 
   // =============================================================================
   // 主题颜色自适应工具函数
@@ -6273,36 +7675,38 @@
   // 显示简易模式菜单（从原生图标下方弹出）
   // =============================================================================
   async function showSimpleMenu() {
-    // 移动端使用滑动切换模式
-    if (isMobileDevice()) {
-      return showMobileMenu();
-    }
-    
-    // 如果已存在，先移除所有面板并保存状态
-    if ($('#worldbook-switcher-simple-menu', parentDoc).length) {
-      // 保存面板状态 - 保持当前状态用于记忆
-      // (面板关闭时不重置状态，让用户下次打开时恢复)
+    try {
+      // 移动端使用滑动切换模式
+      if (isMobileDevice()) {
+        return showMobileMenu();
+      }
       
-      $('#worldbook-switcher-simple-menu', parentDoc).remove();
-      $('#wb-all-worldbooks-panel', parentDoc).remove();
-      $('#wb-frequent-entries-panel', parentDoc).remove();
-      $(parentDoc).off('.wbsimplemenu');
-      return;
-    }
+      // 如果已存在，先移除所有面板并保存状态
+      const $existingMenu = $('#worldbook-switcher-simple-menu', parentDoc);
+      if ($existingMenu.length) {
+        const wasVisible = $existingMenu.is(':visible');
+        // 保存面板状态 - 保持当前状态用于记忆
+        // (面板关闭时不重置状态，让用户下次打开时恢复)
+        closeDesktopMenuPanels();
+        $(parentDoc).off('.wbsimplemenu');
+        if (wasVisible) {
+          return;
+        }
+      }
 
-    const config = getWorldbookSwitcherConfig();
-    
-    // 获取自适应主题颜色
-    const themeColors = getThemeColors();
+      const config = getWorldbookSwitcherConfig();
+      
+      // 获取自适应主题颜色
+      const themeColors = getThemeColors();
 
-    // 获取原生世界信息图标的位置（在父页面中）
-    const $wiIcon = $('#WIDrawerIcon', parentDoc);
-    if (!$wiIcon.length) {
-      console.error('[WorldbookSwitcher] 未找到原生世界信息图标');
-      return;
-    }
+      // 获取原生世界信息图标的位置（在父页面中）
+      const $wiIcon = $('#WIDrawerIcon', parentDoc);
+      if (!$wiIcon.length) {
+        console.error('[WorldbookSwitcher] 未找到原生世界信息图标');
+        return;
+      }
 
-    const iconRect = $wiIcon[0].getBoundingClientRect();
+      const iconRect = $wiIcon[0].getBoundingClientRect();
 
     // 每次打开菜单都获取最新的世界书状态
     console.log('[WorldbookSwitcher] 正在获取最新世界书状态...');
@@ -6349,7 +7753,9 @@
         box-shadow: 0 8px 24px rgba(0,0,0,${themeColors.isLight ? '0.15' : '0.6'});
         min-width: 280px;
         max-width: 320px;
-        max-height: 400px;
+        height: min(520px, calc(100vh - 24px));
+        min-height: min(520px, calc(100vh - 24px));
+        max-height: min(520px, calc(100vh - 24px));
         display: flex;
         flex-direction: column;
         color: ${themeColors.text};
@@ -6443,63 +7849,10 @@
           overflow-y: auto;
           padding: 6px;
         ">
-          ${displayEntries.length === 0 ?
-            `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无条目</div>` :
-            displayEntries.map((entry, idx) => {
-              const displayName = entry.name || truncateText(entry.content, 15) || '(无标题)';
-              return `
-                <div class="wb-simple-entry" data-uid="${entry.uid}" style="
-                  display: flex;
-                  align-items: center;
-                  gap: 8px;
-                  padding: 6px 8px;
-                  border-radius: 4px;
-                  cursor: pointer;
-                  font-size: 0.8em;
-                  ${!entry.enabled ? 'opacity: 0.5;' : ''}
-                  transition: background 0.15s;
-                " onmouseover="this.style.background='rgba(139,92,246,0.15)'" onmouseout="this.style.background='transparent'">
-                  <label style="
-                    position: relative;
-                    display: inline-block;
-                    width: 32px;
-                    height: 18px;
-                    flex-shrink: 0;
-                    cursor: pointer;
-                  ">
-                    <input type="checkbox" class="wb-simple-toggle" data-uid="${entry.uid}"
-                      ${entry.enabled ? 'checked' : ''}
-                      style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
-                    <span style="
-                      position: absolute;
-                      top: 0;
-                      left: 0;
-                      right: 0;
-                      bottom: 0;
-                      background-color: ${entry.enabled ? '#10B981' : '#6B7280'};
-                      transition: 0.3s;
-                      border-radius: 18px;
-                      pointer-events: none;
-                    "></span>
-                    <span style="
-                      position: absolute;
-                      height: 14px;
-                      width: 14px;
-                      left: ${entry.enabled ? '16px' : '2px'};
-                      bottom: 2px;
-                      background-color: white;
-                      transition: 0.3s;
-                      border-radius: 50%;
-                      pointer-events: none;
-                    "></span>
-                  </label>
-                  <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                    ${escapeHtml(displayName)}
-                  </span>
-                </div>
-              `;
-            }).join('')
-          }
+          ${renderCurrentWorldbookEntries(displayEntries, themeColors, {
+            variant: 'desktop',
+            worldbookName: currentState.selectedWorldbook,
+          })}
         </div>
         <!-- 搜索框 -->
         <div style="padding: 6px; border-top: 1px solid ${themeColors.border}; flex-shrink: 0;">
@@ -6517,9 +7870,7 @@
     $('#wb-simple-close-btn', parentDoc).on('click', function(e) {
       e.stopPropagation();
       // 关闭所有面板（不重置状态，保持记忆功能）
-      $('#worldbook-switcher-simple-menu', parentDoc).remove();
-      $('#wb-all-worldbooks-panel', parentDoc).remove();
-      $('#wb-frequent-entries-panel', parentDoc).remove();
+      closeDesktopMenuPanels();
       $(parentDoc).off('.wbsimplemenu');
     });
 
@@ -6536,9 +7887,7 @@
       currentState.isIntercepting = false;
 
       // 关闭所有面板
-      $('#worldbook-switcher-simple-menu', parentDoc).remove();
-      $('#wb-all-worldbooks-panel', parentDoc).remove();
-      $('#wb-frequent-entries-panel', parentDoc).remove();
+      closeDesktopMenuPanels();
       $(parentDoc).off('.wbsimplemenu');
 
       // 触发原生图标点击，打开原生界面
@@ -6568,61 +7917,12 @@
         if (entries.length === 0) {
           $entriesContainer.html(`<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无条目</div>`);
         } else {
-          const entriesHtml = entries.map((entry) => {
-            const displayName = entry.name || truncateText(entry.content, 15) || '(无标题)';
-            return `
-              <div class="wb-simple-entry" data-uid="${entry.uid}" style="
-                display: flex;
-                align-items: center;
-                gap: 8px;
-                padding: 6px 8px;
-                border-radius: 4px;
-                cursor: pointer;
-                font-size: 0.8em;
-                ${!entry.enabled ? 'opacity: 0.5;' : ''}
-                transition: background 0.15s;
-              " onmouseover="this.style.background='rgba(139,92,246,0.15)'" onmouseout="this.style.background='transparent'">
-                <label style="
-                  position: relative;
-                  display: inline-block;
-                  width: 32px;
-                  height: 18px;
-                  flex-shrink: 0;
-                  cursor: pointer;
-                ">
-                  <input type="checkbox" class="wb-simple-toggle" data-uid="${entry.uid}"
-                    ${entry.enabled ? 'checked' : ''}
-                    style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
-                  <span style="
-                    position: absolute;
-                    top: 0;
-                    left: 0;
-                    right: 0;
-                    bottom: 0;
-                    background-color: ${entry.enabled ? '#10B981' : '#6B7280'};
-                    transition: 0.3s;
-                    border-radius: 18px;
-                    pointer-events: none;
-                  "></span>
-                  <span style="
-                    position: absolute;
-                    height: 14px;
-                    width: 14px;
-                    left: ${entry.enabled ? '16px' : '2px'};
-                    bottom: 2px;
-                    background-color: white;
-                    transition: 0.3s;
-                    border-radius: 50%;
-                    pointer-events: none;
-                  "></span>
-                </label>
-                <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                  ${escapeHtml(displayName)}
-                </span>
-              </div>
-            `;
-          }).join('');
-          $entriesContainer.html(entriesHtml);
+          $entriesContainer.html(
+            renderCurrentWorldbookEntries(entries, themeColors, {
+              variant: 'desktop',
+              worldbookName: currentState.selectedWorldbook,
+            }),
+          );
         }
       }
     });
@@ -6653,6 +7953,15 @@
       }
     });
 
+    $('#worldbook-switcher-simple-menu', parentDoc).on('click', '.wb-entry-detail-btn', function(e) {
+      e.stopPropagation();
+      const worldbookName = String($(this).data('worldbook') || currentState.selectedWorldbook || '');
+      const uid = parseInt($(this).data('uid'));
+      if (worldbookName && Number.isInteger(uid)) {
+        void openEntryDetailModal(worldbookName, uid);
+      }
+    });
+
     // 全部世界书按钮点击事件
     $('#wb-all-worldbooks-btn', parentDoc).on('click', function(e) {
       e.stopPropagation();
@@ -6678,24 +7987,24 @@
     $('#wb-simple-search-entries', parentDoc).on('input', function() {
       const keyword = $(this).val().toLowerCase().trim();
       $('#wb-simple-entries .wb-simple-entry', parentDoc).each(function() {
-        const name = $(this).find('span').last().text().toLowerCase();
+        const name = $(this).find('.wb-entry-name').text().toLowerCase();
         $(this).toggle(name.includes(keyword));
       });
     });
 
     // 点击外部关闭
-    scheduleWorldbookTimeout(() => {
-      $(parentDoc).on('click.wbsimplemenu', function(e) {
-        if (!$(e.target).closest('#worldbook-switcher-simple-menu, #WIDrawerIcon, #wb-all-worldbooks-panel, #wb-frequent-entries-panel').length) {
-          // 不重置面板状态，保持记忆功能
-          
-          $('#worldbook-switcher-simple-menu', parentDoc).remove();
-          $('#wb-all-worldbooks-panel', parentDoc).remove();
-          $('#wb-frequent-entries-panel', parentDoc).remove();
-          $(parentDoc).off('.wbsimplemenu');
-        }
-      });
-    }, 100);
+      scheduleWorldbookTimeout(() => {
+        $(parentDoc).on('click.wbsimplemenu', function(e) {
+          if (!$(e.target).closest('#worldbook-switcher-simple-menu, #WIDrawerIcon, #wb-all-worldbooks-panel, #wb-frequent-entries-panel, #wb-entry-detail-panel, #wb-entry-fullscreen-editor').length) {
+            // 不重置面板状态，保持记忆功能
+            closeDesktopMenuPanels();
+            $(parentDoc).off('.wbsimplemenu');
+          }
+        });
+      }, 100);
+    } catch (error) {
+      console.error('[WorldbookSwitcher] showSimpleMenu 执行失败:', error);
+    }
   }
 
   // =============================================================================
@@ -6992,7 +8301,7 @@
   async function showFrequentEntriesPanel() {
     // 如果已存在，先移除并保存状态为关闭
     if ($('#wb-frequent-entries-panel', parentDoc).length) {
-      $('#wb-frequent-entries-panel', parentDoc).remove();
+      removeFrequentEntriesPanel();
       const config = getWorldbookSwitcherConfig();
       config.panelState = config.panelState || {};
       config.panelState.frequentEntries = false;
@@ -7007,25 +8316,7 @@
     saveWorldbookSwitcherConfig(config);
 
     const themeColors = getThemeColors();
-    const frequentEntries = getFrequentEntries(30);
-
-    // 获取每个条目的当前启用状态
-    const entriesWithState = [];
-    const worldbookCache = {};
-    for (const entry of frequentEntries) {
-      if (!worldbookCache[entry.worldbook]) {
-        try {
-          worldbookCache[entry.worldbook] = await getWorldbookEntries(entry.worldbook);
-        } catch (e) {
-          worldbookCache[entry.worldbook] = [];
-        }
-      }
-      const wbEntry = worldbookCache[entry.worldbook].find(e => e.uid === entry.uid);
-      entriesWithState.push({
-        ...entry,
-        enabled: wbEntry ? wbEntry.enabled : false
-      });
-    }
+    const entriesWithState = await getFrequentEntriesWithState(30);
 
     // 获取简易菜单的位置作为参考
     const $simpleMenu = $('#worldbook-switcher-simple-menu', parentDoc);
@@ -7083,91 +8374,7 @@
           overflow-y: auto;
           padding: 6px;
         ">
-          ${entriesWithState.length === 0 ?
-            `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无使用记录<br><span style="font-size: 0.8em;">开关条目后会在此显示</span></div>` :
-            entriesWithState.map(entry => {
-              return `
-                <div class="wb-frequent-entry" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" style="
-                  display: flex;
-                  align-items: center;
-                  gap: 8px;
-                  padding: 6px 8px;
-                  border-radius: 4px;
-                  cursor: pointer;
-                  font-size: 0.8em;
-                  ${!entry.enabled ? 'opacity: 0.5;' : ''}
-                  transition: background 0.15s;
-                " onmouseover="this.style.background='rgba(245,158,11,0.15)'" onmouseout="this.style.background='transparent'">
-                  <label style="
-                    position: relative;
-                    display: inline-block;
-                    width: 32px;
-                    height: 18px;
-                    flex-shrink: 0;
-                    cursor: pointer;
-                  ">
-                    <input type="checkbox" class="wb-frequent-toggle" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}"
-                      ${entry.enabled ? 'checked' : ''}
-                      style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
-                    <span style="
-                      position: absolute;
-                      top: 0;
-                      left: 0;
-                      right: 0;
-                      bottom: 0;
-                      background-color: ${entry.enabled ? '#10B981' : '#6B7280'};
-                      transition: 0.3s;
-                      border-radius: 18px;
-                      pointer-events: none;
-                    "></span>
-                    <span style="
-                      position: absolute;
-                      height: 14px;
-                      width: 14px;
-                      left: ${entry.enabled ? '16px' : '2px'};
-                      bottom: 2px;
-                      background-color: white;
-                      transition: 0.3s;
-                      border-radius: 50%;
-                      pointer-events: none;
-                    "></span>
-                  </label>
-                  <div style="flex: 1; overflow: hidden; min-width: 0;">
-                    <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                      ${entry.pinned ? '<i class="fa-solid fa-thumbtack" style="color: #F59E0B; margin-right: 4px; font-size: 0.8em;"></i>' : ''}${escapeHtml(entry.name || '(无标题)')}
-                    </div>
-                    <div style="font-size: 0.75em; color: ${themeColors.secondaryText}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                      ${escapeHtml(entry.worldbook)}
-                    </div>
-                  </div>
-                  <div style="display: flex; gap: 4px; flex-shrink: 0;">
-                    <button class="wb-frequent-pin" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" data-pinned="${entry.pinned}" title="${entry.pinned ? '取消置顶' : '置顶'}" style="
-                      background: ${entry.pinned ? 'linear-gradient(135deg, #F59E0B 0%, #D97706 100%)' : 'transparent'};
-                      color: ${entry.pinned ? 'white' : themeColors.secondaryText};
-                      border: ${entry.pinned ? 'none' : '1px solid ' + themeColors.border};
-                      border-radius: 4px;
-                      padding: 2px 6px;
-                      cursor: pointer;
-                      font-size: 0.7em;
-                    ">
-                      <i class="fa-solid fa-thumbtack"></i>
-                    </button>
-                    <button class="wb-frequent-remove" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" title="从历史移除" style="
-                      background: transparent;
-                      color: ${themeColors.secondaryText};
-                      border: 1px solid ${themeColors.border};
-                      border-radius: 4px;
-                      padding: 2px 6px;
-                      cursor: pointer;
-                      font-size: 0.7em;
-                    ">
-                      <i class="fa-solid fa-trash"></i>
-                    </button>
-                  </div>
-                </div>
-              `;
-            }).join('')
-          }
+          ${renderFrequentEntries(entriesWithState, themeColors, { variant: 'desktop' })}
         </div>
         <!-- 搜索框 -->
         <div style="padding: 6px; border-top: 1px solid ${themeColors.border}; flex-shrink: 0;">
@@ -7180,6 +8387,7 @@
     `;
 
     $('body', parentDoc).append(panelHtml);
+    repositionEntryDetailPanel();
 
     // 关闭按钮
     $('#wb-frequent-entries-close', parentDoc).on('click', function(e) {
@@ -7188,7 +8396,7 @@
       config.panelState = config.panelState || {};
       config.panelState.frequentEntries = false;
       saveWorldbookSwitcherConfig(config);
-      $('#wb-frequent-entries-panel', parentDoc).remove();
+      removeFrequentEntriesPanel();
     });
 
     // 条目开关切换
@@ -7236,6 +8444,15 @@
       }
     });
 
+    $('#wb-frequent-entries-panel', parentDoc).on('click', '.wb-entry-detail-btn', function(e) {
+      e.stopPropagation();
+      const worldbookName = String($(this).data('worldbook') || '');
+      const uid = parseInt($(this).data('uid'));
+      if (worldbookName && Number.isInteger(uid)) {
+        void openEntryDetailModal(worldbookName, uid);
+      }
+    });
+
     // 置顶按钮点击
     $('#wb-frequent-entries-panel', parentDoc).on('click', '.wb-frequent-pin', async function(e) {
       e.stopPropagation();
@@ -7253,7 +8470,7 @@
       }
 
       // 刷新面板
-      $('#wb-frequent-entries-panel', parentDoc).remove();
+      removeFrequentEntriesPanel({ repositionDetail: false });
       await showFrequentEntriesPanel();
     });
 
@@ -7296,15 +8513,20 @@
   // 移动端滑动切换菜单 - 使用原来菜单的定位方式
   // =============================================================================
   async function showMobileMenu(initialTab = 1) {
-    // 如果已存在，先移除
-    if ($('#worldbook-switcher-mobile-menu', parentDoc).length) {
-      $('#worldbook-switcher-mobile-menu', parentDoc).remove();
-      $(parentDoc).off('.wbmobilemenu');
-      return;
-    }
+    try {
+      // 如果已存在，先移除
+      const $existingMobileMenu = $('#worldbook-switcher-mobile-menu', parentDoc);
+      if ($existingMobileMenu.length) {
+        const wasVisible = $existingMobileMenu.is(':visible');
+        $('#worldbook-switcher-mobile-menu', parentDoc).remove();
+        $(parentDoc).off('.wbmobilemenu');
+        if (wasVisible) {
+          return;
+        }
+      }
 
-    const config = getWorldbookSwitcherConfig();
-    const themeColors = getThemeColors();
+      const config = getWorldbookSwitcherConfig();
+      const themeColors = getThemeColors();
     
     // 获取原生世界信息图标的位置（和原来中间菜单一样）
     const $wiIcon = $('#WIDrawerIcon', parentDoc);
@@ -7323,6 +8545,8 @@
     if (!currentState.selectedWorldbook || !globalWbs.includes(currentState.selectedWorldbook)) {
       currentState.selectedWorldbook = globalWbs[0] || '';
     }
+    currentState.mobileActiveTab = initialTab;
+    currentState.mobileDetailContext = null;
     
     let entries = [];
     if (currentState.selectedWorldbook) {
@@ -7330,18 +8554,7 @@
       currentState.entries = entries;
     }
 
-    // 获取常用条目
-    const frequentEntries = getFrequentEntries(30);
-    const worldbookCache = {};
-    const entriesWithState = [];
-    for (const entry of frequentEntries) {
-      if (!worldbookCache[entry.worldbook]) {
-        try { worldbookCache[entry.worldbook] = await getWorldbookEntries(entry.worldbook); }
-        catch (e) { worldbookCache[entry.worldbook] = []; }
-      }
-      const wbEntry = worldbookCache[entry.worldbook].find(e => e.uid === entry.uid);
-      entriesWithState.push({ ...entry, enabled: wbEntry ? wbEntry.enabled : false });
-    }
+    const entriesWithState = await getFrequentEntriesWithState(30);
 
     // 对世界书列表排序 - 置顶的排在前面
     const sortedWorldbooks = [...allWorldbooks].sort((a, b) => {
@@ -7450,20 +8663,10 @@
             </select>
           </div>
           <div id="wb-mobile-entries-list" style="flex: 1; overflow-y: auto; padding: 0 6px 6px;">
-            ${entries.map(entry => {
-              const displayName = entry.name || truncateText(entry.content, 15) || '(无标题)';
-              return `<div class="wb-mobile-entry" data-uid="${entry.uid}" style="
-                display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; font-size: 0.8em;
-                ${!entry.enabled ? 'opacity: 0.5;' : ''} transition: background 0.15s;
-              " onmouseover="this.style.background='rgba(139,92,246,0.15)'" onmouseout="this.style.background='transparent'">
-                <label style="position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0; cursor: pointer;">
-                  <input type="checkbox" class="wb-mobile-entry-toggle" data-uid="${entry.uid}" ${entry.enabled ? 'checked' : ''} style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
-                  <span style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: ${entry.enabled ? '#10B981' : '#6B7280'}; transition: 0.3s; border-radius: 18px; pointer-events: none;"></span>
-                  <span style="position: absolute; height: 14px; width: 14px; left: ${entry.enabled ? '16px' : '2px'}; bottom: 2px; background-color: white; transition: 0.3s; border-radius: 50%; pointer-events: none;"></span>
-                </label>
-                <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(displayName)}</span>
-              </div>`;
-            }).join('') || `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无条目</div>`}
+            ${renderCurrentWorldbookEntries(entries, themeColors, {
+              variant: 'mobile',
+              worldbookName: currentState.selectedWorldbook,
+            })}
           </div>
           <div style="padding: 6px; border-top: 1px solid ${themeColors.border}; flex-shrink: 0;">
             <input type="text" id="wb-mobile-search-entries" placeholder="搜索条目..." style="
@@ -7476,36 +8679,7 @@
         <!-- 面板2: 常用条目 -->
         <div id="wb-mobile-panel-2" style="display: none; flex-direction: column; flex: 1; overflow: hidden;">
           <div id="wb-mobile-frequent-list" style="flex: 1; overflow-y: auto; padding: 6px;">
-            ${entriesWithState.map(entry => `<div class="wb-mobile-frequent" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" style="
-              display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; font-size: 0.8em;
-              ${!entry.enabled ? 'opacity: 0.5;' : ''} transition: background 0.15s;
-            " onmouseover="this.style.background='rgba(245,158,11,0.15)'" onmouseout="this.style.background='transparent'">
-              <label style="position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0; cursor: pointer;">
-                <input type="checkbox" class="wb-mobile-frequent-toggle" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" ${entry.enabled ? 'checked' : ''} style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;">
-                <span style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: ${entry.enabled ? '#10B981' : '#6B7280'}; transition: 0.3s; border-radius: 18px; pointer-events: none;"></span>
-                <span style="position: absolute; height: 14px; width: 14px; left: ${entry.enabled ? '16px' : '2px'}; bottom: 2px; background-color: white; transition: 0.3s; border-radius: 50%; pointer-events: none;"></span>
-              </label>
-              <div style="flex: 1; overflow: hidden; min-width: 0;">
-                <div style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                  ${entry.pinned ? '<i class="fa-solid fa-thumbtack" style="color: #F59E0B; margin-right: 4px; font-size: 0.8em;"></i>' : ''}${escapeHtml(entry.name || '(无标题)')}
-                </div>
-                <div style="font-size: 0.75em; color: ${themeColors.secondaryText}; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
-                  ${escapeHtml(entry.worldbook)}
-                </div>
-              </div>
-              <div style="display: flex; gap: 4px; flex-shrink: 0;">
-                <button class="wb-mobile-frequent-pin" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" data-pinned="${entry.pinned}" title="${entry.pinned ? '取消置顶' : '置顶'}" style="
-                  background: ${entry.pinned ? 'linear-gradient(135deg, #F59E0B 0%, #D97706 100%)' : 'transparent'};
-                  color: ${entry.pinned ? 'white' : themeColors.secondaryText};
-                  border: ${entry.pinned ? 'none' : '1px solid ' + themeColors.border};
-                  border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 0.7em;
-                "><i class="fa-solid fa-thumbtack"></i></button>
-                <button class="wb-mobile-frequent-remove" data-worldbook="${escapeHtml(entry.worldbook)}" data-uid="${entry.uid}" title="从历史移除" style="
-                  background: transparent; color: ${themeColors.secondaryText};
-                  border: 1px solid ${themeColors.border}; border-radius: 4px; padding: 2px 6px; cursor: pointer; font-size: 0.7em;
-                "><i class="fa-solid fa-trash"></i></button>
-              </div>
-            </div>`).join('') || `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无使用记录</div>`}
+            ${renderFrequentEntries(entriesWithState, themeColors, { variant: 'mobile' })}
           </div>
           <div style="padding: 6px; border-top: 1px solid ${themeColors.border}; flex-shrink: 0;">
             <input type="text" id="wb-mobile-search-frequent" placeholder="搜索常用条目..." style="
@@ -7514,6 +8688,7 @@
             ">
           </div>
         </div>
+        <div id="wb-mobile-detail-view" style="display: none; flex: 1; overflow: hidden;"></div>
       </div>
     `;
 
@@ -7540,7 +8715,7 @@
         }
       });
       // 切换面板显示
-      $('#wb-mobile-panel-0, #wb-mobile-panel-1, #wb-mobile-panel-2', parentDoc).hide();
+      $('#wb-mobile-panel-0, #wb-mobile-panel-1, #wb-mobile-panel-2, #wb-mobile-detail-view', parentDoc).hide();
       $(`#wb-mobile-panel-${initialTab}`, parentDoc).css('display', 'flex');
     }
 
@@ -7548,6 +8723,8 @@
     $('#worldbook-switcher-mobile-menu .wb-mobile-tab', parentDoc).on('click', function() {
       const tab = parseInt($(this).data('tab'));
       const themeColors = getThemeColors();
+      currentState.mobileDetailContext = null;
+      currentState.mobileActiveTab = tab;
       
       // 更新标签样式
       $('.wb-mobile-tab', parentDoc).each(function() {
@@ -7564,6 +8741,7 @@
       });
       
       // 切换面板显示
+      $('#wb-mobile-detail-view', parentDoc).hide().empty();
       $('#wb-mobile-panel-0, #wb-mobile-panel-1, #wb-mobile-panel-2', parentDoc).hide();
       $(`#wb-mobile-panel-${tab}`, parentDoc).css('display', 'flex');
     });
@@ -7628,13 +8806,12 @@
         const newEntries = await getWorldbookEntries(selectedWb);
         currentState.entries = newEntries;
         const themeColors = getThemeColors();
-        $('#wb-mobile-entries-list', parentDoc).html(newEntries.map(entry => {
-          const displayName = entry.name || truncateText(entry.content, 15) || '(无标题)';
-          return `<div class="wb-mobile-entry" data-uid="${entry.uid}" style="display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 4px; font-size: 0.8em; ${!entry.enabled ? 'opacity: 0.5;' : ''} transition: background 0.15s;" onmouseover="this.style.background='rgba(139,92,246,0.15)'" onmouseout="this.style.background='transparent'">
-            <label style="position: relative; display: inline-block; width: 32px; height: 18px; flex-shrink: 0; cursor: pointer;"><input type="checkbox" class="wb-mobile-entry-toggle" data-uid="${entry.uid}" ${entry.enabled ? 'checked' : ''} style="position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; z-index: 1;"><span style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: ${entry.enabled ? '#10B981' : '#6B7280'}; transition: 0.3s; border-radius: 18px; pointer-events: none;"></span><span style="position: absolute; height: 14px; width: 14px; left: ${entry.enabled ? '16px' : '2px'}; bottom: 2px; background-color: white; transition: 0.3s; border-radius: 50%; pointer-events: none;"></span></label>
-            <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(displayName)}</span>
-          </div>`;
-        }).join('') || `<div style="text-align: center; padding: 20px; color: ${themeColors.secondaryText}; font-size: 0.85em;">暂无条目</div>`);
+        $('#wb-mobile-entries-list', parentDoc).html(
+          renderCurrentWorldbookEntries(newEntries, themeColors, {
+            variant: 'mobile',
+            worldbookName: currentState.selectedWorldbook,
+          }),
+        );
       }
     });
 
@@ -7652,6 +8829,15 @@
         $item.css('opacity', enabled ? '1' : '0.5');
         $(this).siblings('span').first().css('background-color', enabled ? '#10B981' : '#6B7280');
         $(this).siblings('span').last().css('left', enabled ? '16px' : '2px');
+      }
+    });
+
+    $('#worldbook-switcher-mobile-menu', parentDoc).on('click', '.wb-entry-detail-btn', function(e) {
+      e.stopPropagation();
+      const worldbookName = String($(this).data('worldbook') || currentState.selectedWorldbook || '');
+      const uid = parseInt($(this).data('uid'));
+      if (worldbookName && Number.isInteger(uid)) {
+        void openMobileEntryDetailView(worldbookName, uid);
       }
     });
 
@@ -7758,7 +8944,7 @@
     $('#wb-mobile-search-entries', parentDoc).on('input', function() {
       const keyword = $(this).val().toLowerCase().trim();
       $('#wb-mobile-entries-list .wb-mobile-entry', parentDoc).each(function() {
-        const name = $(this).find('span').last().text().toLowerCase();
+        const name = $(this).find('.wb-entry-name').text().toLowerCase();
         $(this).toggle(name.includes(keyword));
       });
     });
@@ -7774,14 +8960,17 @@
     });
 
     // 点击外部关闭
-    scheduleWorldbookTimeout(() => {
-      $(parentDoc).on('click.wbmobilemenu', function(e) {
-        if (!$(e.target).closest('#worldbook-switcher-mobile-menu, #WIDrawerIcon').length) {
-          $('#worldbook-switcher-mobile-menu', parentDoc).remove();
-          $(parentDoc).off('.wbmobilemenu');
-        }
-      });
-    }, 100);
+      scheduleWorldbookTimeout(() => {
+        $(parentDoc).on('click.wbmobilemenu', function(e) {
+          if (!$(e.target).closest('#worldbook-switcher-mobile-menu, #WIDrawerIcon, #wb-entry-fullscreen-editor').length) {
+            $('#worldbook-switcher-mobile-menu', parentDoc).remove();
+            $(parentDoc).off('.wbmobilemenu');
+          }
+        });
+      }, 100);
+    } catch (error) {
+      console.error('[WorldbookSwitcher] showMobileMenu 执行失败:', error);
+    }
   }
 
   // =============================================================================
