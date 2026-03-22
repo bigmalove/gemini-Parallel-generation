@@ -1772,6 +1772,34 @@
     return false;
   }
 
+  async function jumpToFloorStart(targetId) {
+    const normalizedTargetId = normalizeMessageId(targetId);
+    if (normalizedTargetId === null) return false;
+
+    await sleep(80);
+
+    let jumped = false;
+    try {
+      jumped = await jumpToFloor(normalizedTargetId);
+    } catch (error) {
+      warn('跳转到楼层开头失败:', error);
+    }
+
+    if (jumped) {
+      return true;
+    }
+
+    const items = getNavigableMessageItems();
+    const targetIndex = findMessageIndexById(items, normalizedTargetId);
+    const target = targetIndex >= 0 ? items[targetIndex] : null;
+    if (target?.el && typeof target.el.scrollIntoView === 'function') {
+      target.el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return true;
+    }
+
+    return false;
+  }
+
   async function navigateFloor(direction) {
     const items = getNavigableMessageItems();
     if (!items.length) return;
@@ -4621,6 +4649,12 @@
       messageId: createdMessageId,
       wroteSwipes: restTexts.length > 0,
     });
+
+    try {
+      await jumpToFloorStart(createdMessageId);
+    } catch (error) {
+      warn('新楼层创建后自动跳转失败:', error);
+    }
 
     return { appended: true, messageId: createdMessageId };
   }
