@@ -92,6 +92,22 @@
   const DEFAULT_PARALLEL_TEMPERATURE = 1.0;
   const FETCH_RETRY_SKIP_FLAG = '__gemini_parallel_retry_handled';
   const FETCH_PATCH_MARKER = '__GeminiParallelSwipeFetchPatched';
+  const PAIRED_SWIPE_META_KEY = '__gemini_parallel_pair';
+  const PAIRED_SWIPE_STATUS_KEY = '__gemini_parallel_branch_status';
+  const PAIRED_SWIPE_PAYLOAD_KEY = '__gemini_parallel_payload_snapshot';
+  const PAIRED_SWIPE_PENDING_TEXT = '生成中...';
+  const PAIRED_SWIPE_COMPOSER_CLASS = 'gemini-paired-inline-composer';
+  const PAIRED_SWIPE_COMPOSER_OPEN_CLASS = 'is-open';
+  const PAIRED_SWIPE_USER_CONTAINER_CLASS = 'gemini-paired-user-controls';
+  const PAIRED_SWIPE_BRANCH_BUTTON_CLASS = 'gemini-paired-branch-btn';
+  const PAIRED_SWIPE_STATUS_TEXT_CLASS = 'gemini-paired-status-text';
+  const PAIRED_SWIPE_COMPOSER_TEXTAREA_CLASS = 'gemini-paired-inline-textarea';
+  const PAIRED_SWIPE_COMPOSER_ACTIONS_CLASS = 'gemini-paired-inline-actions';
+  const PAIRED_SWIPE_COMPOSER_CONFIRM_CLASS = 'gemini-paired-inline-confirm';
+  const PAIRED_SWIPE_COMPOSER_CANCEL_CLASS = 'gemini-paired-inline-cancel';
+  const PAIRED_SWIPE_COMPOSER_FEEDBACK_CLASS = 'gemini-paired-inline-feedback';
+  const PAIRED_SWIPE_PLACEHOLDER_CLASS = 'is-placeholder';
+  const PAIRED_SWIPE_ERROR_CLASS = 'is-error';
 
   const instanceKey = '__GeminiParallelSwipeInstance';
   const globalObj = getHostWindow();
@@ -133,6 +149,14 @@
   const retryStatusEntries = new Map();
   const navPressFeedbackTimers = new WeakMap();
   const temporarySuspensions = new Map();
+  const pairedSwipeStates = new Map();
+  const pairedSwipeJobs = new Map();
+  const pairedSwipeSyncLocks = new Set();
+  let pairedSwipePairSeq = 0;
+  let pairedSwipeBranchSeq = 0;
+  let pairedSwipeComposerUserMessageId = null;
+  let pairedSwipeComposerDraft = '';
+  let foregroundGenerationRunning = false;
 
   function log(...args) {
     console.log(TAG, ...args);
@@ -1145,6 +1169,49 @@
     return false;
   }
 
+  function closeActivePopupForNode(node) {
+    const context = getContext();
+    const hostWindow = getHostWindow();
+    const hostDocument = node?.ownerDocument || getHostDocument();
+    const candidates = [
+      context,
+      hostWindow?.SillyTavern,
+      window.SillyTavern,
+      hostWindow,
+      window,
+    ].filter(Boolean);
+
+    for (const candidate of candidates) {
+      if (typeof candidate.closePopup === 'function') {
+        try {
+          candidate.closePopup();
+          return true;
+        } catch (error) {
+          warn('调用 closePopup 关闭弹窗失败，将尝试备用关闭方式:', error);
+        }
+      }
+    }
+
+    const popupCancelButton = hostDocument?.querySelector?.('#dialogue_popup_cancel');
+    if (popupCancelButton && typeof popupCancelButton.click === 'function') {
+      popupCancelButton.click();
+      return true;
+    }
+
+    let current = node?.parentElement || null;
+    while (current) {
+      const buttons = Array.from(current.querySelectorAll('button'));
+      const cancelButton = buttons.find(button => String(button?.textContent || '').trim() === '取消');
+      if (cancelButton && typeof cancelButton.click === 'function') {
+        cancelButton.click();
+        return true;
+      }
+      current = current.parentElement;
+    }
+
+    return false;
+  }
+
   async function openSettingsPopup() {
     if (isSettingsPopupOpening) return;
     isSettingsPopupOpening = true;
@@ -1327,6 +1394,109 @@
       wbCheckbox.checked = Boolean(config.worldbook_switcher_enabled);
       wbRow.append(wbLabel, wbCheckbox);
       panel.appendChild(wbRow);
+
+      const actionTitle = hostDocument.createElement('div');
+      actionTitle.textContent = '附加操作';
+      actionTitle.style.fontWeight = '700';
+      actionTitle.style.marginTop = '10px';
+      actionTitle.style.color = 'var(--SmartThemeEmColor, #9ac7ff)';
+      panel.appendChild(actionTitle);
+
+      const aiFloorActionRow = hostDocument.createElement('div');
+      aiFloorActionRow.className = SETTINGS_ROW_CLASS;
+      const aiFloorActionLabel = hostDocument.createElement('label');
+      aiFloorActionLabel.textContent = '空 AI 楼层';
+      aiFloorActionLabel.style.fontWeight = '700';
+      aiFloorActionLabel.style.color = 'var(--SmartThemeBodyColor, #f5f7fa)';
+      const aiFloorActionButton = hostDocument.createElement('button');
+      aiFloorActionButton.type = 'button';
+      aiFloorActionButton.textContent = '添加 AI 楼层';
+      aiFloorActionButton.style.minWidth = '122px';
+      aiFloorActionButton.style.height = '34px';
+      aiFloorActionButton.style.padding = '0 14px';
+      aiFloorActionButton.style.borderRadius = '8px';
+      aiFloorActionButton.style.border = '1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.28))';
+      aiFloorActionButton.style.background = 'var(--SmartThemeBlurTintColor, rgba(20, 24, 32, 0.92))';
+      aiFloorActionButton.style.color = 'var(--SmartThemeBodyColor, #f5f7fa)';
+      aiFloorActionButton.style.fontWeight = '700';
+      aiFloorActionButton.style.cursor = 'pointer';
+      aiFloorActionButton.style.transition = 'background-color 120ms ease, border-color 120ms ease, box-shadow 180ms ease, transform 120ms ease';
+      aiFloorActionButton.setAttribute('aria-label', '添加 AI 楼层');
+      aiFloorActionRow.append(aiFloorActionLabel, aiFloorActionButton);
+      panel.appendChild(aiFloorActionRow);
+
+      const aiFloorActionHint = hostDocument.createElement('div');
+      aiFloorActionHint.textContent = '点击后在当前聊天末尾追加一条空 assistant 楼层，不会保存任何设置。';
+      aiFloorActionHint.style.opacity = '0.82';
+      aiFloorActionHint.style.fontSize = '12px';
+      aiFloorActionHint.style.color = 'var(--SmartThemeBodyColor, #f5f7fa)';
+      panel.appendChild(aiFloorActionHint);
+
+      let isAddingEmptyAiFloor = false;
+      const syncAiFloorActionButtonStyle = ({ busy = false, highlighted = false } = {}) => {
+        if (busy) {
+          aiFloorActionButton.style.background = 'rgba(154, 199, 255, 0.16)';
+          aiFloorActionButton.style.borderColor = 'var(--SmartThemeEmColor, #9ac7ff)';
+          aiFloorActionButton.style.boxShadow = '0 0 0 1px rgba(154, 199, 255, 0.35)';
+          aiFloorActionButton.style.transform = 'none';
+          return;
+        }
+
+        aiFloorActionButton.style.background = highlighted
+          ? 'rgba(154, 199, 255, 0.18)'
+          : 'var(--SmartThemeBlurTintColor, rgba(20, 24, 32, 0.92))';
+        aiFloorActionButton.style.borderColor = highlighted
+          ? 'var(--SmartThemeEmColor, #9ac7ff)'
+          : 'var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.28))';
+        aiFloorActionButton.style.boxShadow = highlighted
+          ? '0 0 0 1px var(--SmartThemeEmColor, #9ac7ff), 0 0 8px rgba(154, 199, 255, 0.35)'
+          : 'none';
+        aiFloorActionButton.style.transform = highlighted ? 'translateY(-1px)' : 'none';
+      };
+      const setAiFloorActionBusy = (busy) => {
+        isAddingEmptyAiFloor = busy;
+        aiFloorActionButton.disabled = busy;
+        aiFloorActionButton.style.cursor = busy ? 'wait' : 'pointer';
+        aiFloorActionButton.textContent = busy ? '添加中...' : '添加 AI 楼层';
+        syncAiFloorActionButtonStyle({ busy, highlighted: false });
+      };
+      syncAiFloorActionButtonStyle();
+      aiFloorActionButton.addEventListener('mouseenter', () => {
+        if (!isAddingEmptyAiFloor) syncAiFloorActionButtonStyle({ highlighted: true });
+      });
+      aiFloorActionButton.addEventListener('mouseleave', () => {
+        if (!isAddingEmptyAiFloor) syncAiFloorActionButtonStyle();
+      });
+      aiFloorActionButton.addEventListener('focus', () => {
+        if (!isAddingEmptyAiFloor) syncAiFloorActionButtonStyle({ highlighted: true });
+      });
+      aiFloorActionButton.addEventListener('blur', () => {
+        if (!isAddingEmptyAiFloor) syncAiFloorActionButtonStyle();
+      });
+      aiFloorActionButton.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (isAddingEmptyAiFloor) return;
+
+        setAiFloorActionBusy(true);
+        try {
+          const created = await createEmptyAssistantMessageAtEnd();
+          if (!created?.appended || !Number.isFinite(Number(created.messageId))) {
+            throw new Error('空 AI 楼层创建失败');
+          }
+
+          successToast('已添加空 AI 楼层');
+          const popupClosed = closeActivePopupForNode(aiFloorActionButton);
+          if (!popupClosed) {
+            setAiFloorActionBusy(false);
+            warningToast('空 AI 楼层已创建，请手动关闭设置弹窗');
+          }
+        } catch (error) {
+          warn('添加空 AI 楼层失败:', error);
+          errorToast(`添加 AI 楼层失败：${error?.message || 'unknown error'}`);
+          setAiFloorActionBusy(false);
+        }
+      });
 
       const statusBarOpacityRow = hostDocument.createElement('div');
       statusBarOpacityRow.className = SETTINGS_ROW_CLASS;
@@ -3958,7 +4128,7 @@
     const merged = existing.concat(sanitizedNewSwipes);
     const rawSwipeId = Number(message.swipe_id);
     const swipeId = Number.isFinite(rawSwipeId) ? Math.max(0, Math.floor(rawSwipeId)) : 0;
-    const clampedSwipeId = Boolean(options?.activateNewest)
+    const clampedSwipeId = options?.activateNewest
       ? Math.max(0, merged.length - 1)
       : Math.min(swipeId, Math.max(0, merged.length - 1));
 
@@ -4581,6 +4751,64 @@
     }
 
     return null;
+  }
+
+  async function waitForLatestAssistantMessageIdAfter(minExclusiveId) {
+    if (typeof getLastMessageId !== 'function') {
+      return null;
+    }
+
+    const minId = Number.isFinite(Number(minExclusiveId))
+      ? Math.floor(Number(minExclusiveId))
+      : -1;
+
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const rawLastId = Number(getLastMessageId());
+      if (Number.isFinite(rawLastId) && rawLastId > minId) {
+        const lastId = Math.floor(rawLastId);
+        const message = readMessageById(lastId, false);
+        if (message && message.role === 'assistant' && Number.isFinite(Number(message.message_id))) {
+          return Number(message.message_id);
+        }
+      }
+      await sleep(80);
+    }
+
+    return null;
+  }
+
+  async function createEmptyAssistantMessageAtEnd() {
+    if (typeof createChatMessages !== 'function') {
+      throw new Error('createChatMessages 不可用');
+    }
+
+    const beforeLastMessageId = typeof getLastMessageId === 'function'
+      ? Number(getLastMessageId())
+      : null;
+
+    await createChatMessages(
+      [
+        {
+          role: 'assistant',
+          message: '',
+        },
+      ],
+      { refresh: 'affected' },
+    );
+
+    const createdMessageId = await waitForLatestAssistantMessageIdAfter(beforeLastMessageId);
+    if (!Number.isFinite(createdMessageId) || createdMessageId < 0) {
+      warn('空 AI 楼层创建后定位失败');
+      return { appended: false, messageId: null };
+    }
+
+    try {
+      await jumpToFloorStart(createdMessageId);
+    } catch (error) {
+      warn('空 AI 楼层创建后自动跳转失败:', error);
+    }
+
+    return { appended: true, messageId: createdMessageId };
   }
 
   async function createAssistantMessageWithSwipes(job, newSwipes) {
@@ -5227,10 +5455,12 @@
       return;
     }
 
+    foregroundGenerationRunning = true;
     lastGenerationType = normalizedType;
 
     generationSequence += 1;
     beginForegroundSession(generationSequence);
+    markLatestPairedSwipeForegroundPending(true);
 
     if (
       activeJob
@@ -5274,13 +5504,11 @@
       if (!shouldArmParallelJob({ generationType, source, desiredN })) {
         if (
           isEffectivelyEnabled()
-          && shouldValidateForegroundMinReplyTokens()
-          && desiredN === 1
           && generateData
           && typeof generateData === 'object'
         ) {
           const foregroundSession = updateForegroundPayloadSnapshot(generateData);
-          debug('前台生成参数快照已更新（n=1，仅用于最小长度校验）', {
+          debug('前台生成参数快照已更新（用于成对分支/前台校验）', {
             generationSeq: foregroundSession?.generationSeq,
             hasPayload: Boolean(foregroundSession?.payloadSnapshot),
             desiredN,
@@ -5404,14 +5632,17 @@
   function onGenerationStopped() {
     const job = activeJob;
     debug('收到 GENERATION_STOPPED', { activeJob: summarizeJob(job) });
+    foregroundGenerationRunning = false;
     abortForegroundValidation('收到 GENERATION_STOPPED');
     if (activeForegroundSession) {
       activeForegroundSession.awaitingGenerationId = false;
     }
+    markLatestPairedSwipeForegroundPending(false);
 
     if (!job) {
       stopStatusBarTracker();
       refreshStatusBarForRetryState();
+      scheduleOldFloorSwipeScan();
       return;
     }
     if (isJobTerminal(job)) return;
@@ -5423,6 +5654,7 @@
     job.foregroundValidationDone = true;
     job.foregroundValidationPassed = false;
     refreshStatusBarForRetryState();
+    scheduleOldFloorSwipeScan();
     void tryFinalizeJob(job);
   }
 
@@ -5430,9 +5662,11 @@
     const job = activeJob;
     debug('收到 GENERATION_ENDED', { messageId, activeJob: summarizeJob(job) });
     const targetMessageId = resolveEndedAssistantMessageId(messageId);
+    foregroundGenerationRunning = false;
     if (activeForegroundSession) {
       activeForegroundSession.awaitingGenerationId = false;
     }
+    markLatestPairedSwipeForegroundPending(false, Number.isFinite(targetMessageId) ? targetMessageId : null);
 
     if (job && !isJobTerminal(job)) {
       job.foregroundEnded = true;
@@ -5466,9 +5700,15 @@
       }
     }
 
+    if (Number.isFinite(targetMessageId) && targetMessageId >= 0) {
+      void persistLatestPairedSwipePayloadSnapshot(targetMessageId)
+        .catch(error => warn('持久化最近消息分支快照失败:', error));
+    }
+
     if (job && !isJobTerminal(job)) {
       void tryFinalizeJob(job);
     }
+    scheduleOldFloorSwipeScan();
   }
 
   function onMessageReceived(messageId) {
@@ -5510,6 +5750,792 @@
     }
   }
 
+  function createPairedSwipePairId() {
+    pairedSwipePairSeq += 1;
+    return `paired_swipe_pair_${Date.now()}_${pairedSwipePairSeq}`;
+  }
+
+  function createPairedSwipeBranchId(pairId) {
+    pairedSwipeBranchSeq += 1;
+    return `${pairId}_branch_${Date.now()}_${pairedSwipeBranchSeq}`;
+  }
+
+  function getCurrentSwipeIndex(message) {
+    const rawSwipeId = Number(message?.swipe_id);
+    if (!Number.isFinite(rawSwipeId)) return 0;
+    return Math.max(0, Math.floor(rawSwipeId));
+  }
+
+  function getMessageSwipeTexts(message) {
+    if (Array.isArray(message?.swipes) && message.swipes.length > 0) {
+      return message.swipes.map(item => String(item ?? ''));
+    }
+    return [String(message?.message ?? '')];
+  }
+
+  function normalizePairedSwipeStatuses(rawStatuses) {
+    const normalized = {};
+    if (!rawStatuses || typeof rawStatuses !== 'object' || Array.isArray(rawStatuses)) {
+      return normalized;
+    }
+
+    for (const [branchId, status] of Object.entries(rawStatuses)) {
+      const normalizedBranchId = String(branchId || '').trim();
+      if (!normalizedBranchId) continue;
+      if (status === 'pending' || status === 'done' || status === 'error') {
+        normalized[normalizedBranchId] = status;
+      }
+    }
+
+    return normalized;
+  }
+
+  function readPairedSwipeMeta(message) {
+    const rawMeta = message?.extra?.[PAIRED_SWIPE_META_KEY];
+    if (!rawMeta || typeof rawMeta !== 'object' || Array.isArray(rawMeta)) {
+      return null;
+    }
+
+    const pairId = String(rawMeta.pairId || '').trim();
+    const role = rawMeta.role === 'assistant' ? 'assistant' : (rawMeta.role === 'user' ? 'user' : '');
+    const counterpartMessageId = normalizeMessageId(rawMeta.counterpartMessageId);
+    const branchIds = Array.isArray(rawMeta.branchIds)
+      ? rawMeta.branchIds.map(item => String(item || '').trim()).filter(Boolean)
+      : [];
+
+    if (!pairId || !role || counterpartMessageId === null || branchIds.length === 0) {
+      return null;
+    }
+
+    return {
+      pairId,
+      role,
+      counterpartMessageId,
+      branchIds,
+    };
+  }
+
+  function cloneExtra(extra) {
+    if (!extra || typeof extra !== 'object' || Array.isArray(extra)) {
+      return {};
+    }
+    return deepClone(extra);
+  }
+
+  function normalizePairedSwipePayloadSnapshot(rawPayload) {
+    const payload = deepClone(rawPayload || null);
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      return null;
+    }
+    if (!Array.isArray(payload.messages) || payload.messages.length === 0) {
+      return null;
+    }
+    return payload;
+  }
+
+  function readPairedSwipePayloadSnapshot(userMessage = null, assistantMessage = null) {
+    const assistantPayload = normalizePairedSwipePayloadSnapshot(assistantMessage?.extra?.[PAIRED_SWIPE_PAYLOAD_KEY]);
+    if (assistantPayload) {
+      return assistantPayload;
+    }
+
+    const userPayload = normalizePairedSwipePayloadSnapshot(userMessage?.extra?.[PAIRED_SWIPE_PAYLOAD_KEY]);
+    if (userPayload) {
+      return userPayload;
+    }
+
+    const userMeta = readPairedSwipeMeta(userMessage);
+    const assistantMeta = readPairedSwipeMeta(assistantMessage);
+    const pairId = String(userMeta?.pairId || assistantMeta?.pairId || '').trim();
+    if (!pairId) {
+      return null;
+    }
+
+    const runtimeState = pairedSwipeStates.get(pairId);
+    return normalizePairedSwipePayloadSnapshot(runtimeState?.basePayloadSnapshot);
+  }
+
+  function buildPairedSwipeMeta(state, role) {
+    return {
+      pairId: state.pairId,
+      role,
+      counterpartMessageId: role === 'user' ? state.assistantMessageId : state.userMessageId,
+      branchIds: state.branchIds.slice(),
+    };
+  }
+
+  function buildPairedSwipeExtra(message, state, role, statuses = null) {
+    const nextExtra = cloneExtra(message?.extra);
+    nextExtra[PAIRED_SWIPE_META_KEY] = buildPairedSwipeMeta(state, role);
+    if (role === 'assistant') {
+      nextExtra[PAIRED_SWIPE_STATUS_KEY] = normalizePairedSwipeStatuses(statuses ?? state.statusByBranchId);
+      const payloadSnapshot = normalizePairedSwipePayloadSnapshot(state.basePayloadSnapshot);
+      if (payloadSnapshot) {
+        nextExtra[PAIRED_SWIPE_PAYLOAD_KEY] = payloadSnapshot;
+      }
+    }
+    return nextExtra;
+  }
+
+  function capturePairedSwipeBasePayloadSnapshot() {
+    return normalizePairedSwipePayloadSnapshot(activeForegroundSession?.payloadSnapshot || activeJob?.basePayload || null);
+  }
+
+  function resolvePairedSwipeBasePayloadSnapshot(userMessage = null, assistantMessage = null) {
+    return (
+      capturePairedSwipeBasePayloadSnapshot()
+      || readPairedSwipePayloadSnapshot(userMessage, assistantMessage)
+      || null
+    );
+  }
+
+  function findLatestUserAssistantPair() {
+    if (typeof getLastMessageId !== 'function' || typeof getChatMessages !== 'function') {
+      return null;
+    }
+
+    const rawLastId = Number(getLastMessageId());
+    if (!Number.isFinite(rawLastId) || rawLastId < 0) {
+      return null;
+    }
+
+    const lastId = Math.floor(rawLastId);
+    const messages = getChatMessages(`0-${lastId}`, {
+      hide_state: 'all',
+      include_swipes: true,
+    });
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return null;
+    }
+
+    let assistantMessage = null;
+    let userMessage = null;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (!message || message.role === 'system') {
+        continue;
+      }
+
+      if (!assistantMessage && message.role === 'assistant') {
+        assistantMessage = message;
+        continue;
+      }
+
+      if (assistantMessage && message.role === 'user') {
+        userMessage = message;
+        break;
+      }
+    }
+
+    if (!userMessage || !assistantMessage) {
+      return null;
+    }
+
+    return {
+      userMessage,
+      assistantMessage,
+    };
+  }
+
+  function isLatestPairedSwipeTarget(userMessageId, assistantMessageId) {
+    const latestPair = findLatestUserAssistantPair();
+    if (!latestPair) return false;
+    return Number(latestPair.userMessage?.message_id) === Number(userMessageId)
+      && Number(latestPair.assistantMessage?.message_id) === Number(assistantMessageId);
+  }
+
+  function syncPairedSwipeStateSnapshot(state, userMessage, assistantMessage) {
+    state.userMessageId = Number(userMessage.message_id);
+    state.assistantMessageId = Number(assistantMessage.message_id);
+    state.branchIds = Array.isArray(state.branchIds) ? state.branchIds.slice() : [];
+
+    const userSwipes = getMessageSwipeTexts(userMessage);
+    const assistantSwipes = getMessageSwipeTexts(assistantMessage);
+    const branchCount = Math.max(userSwipes.length, assistantSwipes.length, state.branchIds.length, 1);
+
+    while (state.branchIds.length < branchCount) {
+      state.branchIds.push(createPairedSwipeBranchId(state.pairId));
+    }
+
+    const assistantStatuses = normalizePairedSwipeStatuses(assistantMessage?.extra?.[PAIRED_SWIPE_STATUS_KEY]);
+    state.statusByBranchId = {
+      ...state.statusByBranchId,
+      ...assistantStatuses,
+    };
+
+    for (const branchId of state.branchIds) {
+      if (!state.statusByBranchId[branchId]) {
+        state.statusByBranchId[branchId] = 'done';
+      }
+    }
+
+    const maxSwipeIndex = Math.max(0, branchCount - 1);
+    state.activeBranchIndex = Math.min(
+      Math.max(getCurrentSwipeIndex(assistantMessage), getCurrentSwipeIndex(userMessage)),
+      maxSwipeIndex,
+    );
+    pairedSwipeStates.set(state.pairId, state);
+    return state;
+  }
+
+  function getOrCreatePairedSwipeStateFromMessages(userMessage, assistantMessage, options = {}) {
+    if (!userMessage || !assistantMessage) return null;
+    if (userMessage.role !== 'user' || assistantMessage.role !== 'assistant') return null;
+
+    const userMeta = readPairedSwipeMeta(userMessage);
+    const assistantMeta = readPairedSwipeMeta(assistantMessage);
+    let pairId = '';
+    let branchIds = [];
+
+    if (
+      userMeta
+      && assistantMeta
+      && userMeta.pairId === assistantMeta.pairId
+      && userMeta.counterpartMessageId === Number(assistantMessage.message_id)
+      && assistantMeta.counterpartMessageId === Number(userMessage.message_id)
+    ) {
+      pairId = userMeta.pairId;
+      branchIds = userMeta.branchIds.slice();
+    } else {
+      for (const state of pairedSwipeStates.values()) {
+        if (
+          Number(state.userMessageId) === Number(userMessage.message_id)
+          && Number(state.assistantMessageId) === Number(assistantMessage.message_id)
+        ) {
+          pairId = state.pairId;
+          branchIds = state.branchIds.slice();
+          break;
+        }
+      }
+    }
+
+    if (!pairId && !options.create) {
+      return null;
+    }
+
+    if (!pairId) {
+      pairId = createPairedSwipePairId();
+      branchIds = [createPairedSwipeBranchId(pairId)];
+    }
+
+    const existingState = pairedSwipeStates.get(pairId);
+    const nextState = existingState || {
+      pairId,
+      userMessageId: Number(userMessage.message_id),
+      assistantMessageId: Number(assistantMessage.message_id),
+      branchIds: branchIds.slice(),
+      statusByBranchId: {},
+      basePayloadSnapshot: null,
+      foregroundPending: false,
+      activeBranchIndex: 0,
+    };
+
+    if (!existingState) {
+      nextState.branchIds = branchIds.slice();
+      nextState.statusByBranchId = {};
+    }
+
+    if (!nextState.basePayloadSnapshot && options.basePayloadSnapshot) {
+      nextState.basePayloadSnapshot = deepClone(options.basePayloadSnapshot);
+    }
+    if (!nextState.basePayloadSnapshot) {
+      nextState.basePayloadSnapshot = resolvePairedSwipeBasePayloadSnapshot(userMessage, assistantMessage);
+    }
+    if (typeof options.foregroundPending === 'boolean') {
+      nextState.foregroundPending = options.foregroundPending;
+    }
+
+    return syncPairedSwipeStateSnapshot(nextState, userMessage, assistantMessage);
+  }
+
+  function getPairedSwipeStateByMessageId(messageId) {
+    const message = readMessageById(messageId, false);
+    if (!message) return null;
+
+    const meta = readPairedSwipeMeta(message);
+    if (!meta) return null;
+
+    const counterpart = readMessageById(meta.counterpartMessageId, false);
+    if (!counterpart) return null;
+
+    const userMessage = message.role === 'user' ? message : counterpart;
+    const assistantMessage = message.role === 'assistant' ? message : counterpart;
+    if (userMessage.role !== 'user' || assistantMessage.role !== 'assistant') {
+      return null;
+    }
+
+    return getOrCreatePairedSwipeStateFromMessages(userMessage, assistantMessage, { create: false });
+  }
+
+  function clearPairedSwipeComposerState() {
+    pairedSwipeComposerUserMessageId = null;
+    pairedSwipeComposerDraft = '';
+  }
+
+  function clearPairedSwipeRuntimeState(options = {}) {
+    if (options.abortJobs !== false) {
+      for (const job of pairedSwipeJobs.values()) {
+        try {
+          job.controller?.abort();
+        } catch {
+          // ignore
+        }
+      }
+    }
+    pairedSwipeJobs.clear();
+    pairedSwipeStates.clear();
+    pairedSwipeSyncLocks.clear();
+    clearPairedSwipeComposerState();
+  }
+
+  function cancelActiveParallelSupplementOnly(reason = '进入成对分支模式') {
+    const job = activeJob;
+    if (!job || isJobTerminal(job)) {
+      return false;
+    }
+
+    debug('进入成对分支模式，终止旧并发补全写入', {
+      reason,
+      job: summarizeJob(job),
+    });
+    job.superseded = true;
+    job.supersededReason = String(reason || '成对分支模式已接管');
+    job.aborted = true;
+    setJobPhase(job, JOB_PHASES.superseded);
+    abortJobControllers(job);
+    clearActiveJobIfMatch(job);
+    return true;
+  }
+
+  async function writePairedSwipeMessages(state, options = {}) {
+    const userMessage = readMessageById(state.userMessageId, false);
+    const assistantMessage = readMessageById(state.assistantMessageId, false);
+    if (!userMessage || !assistantMessage) {
+      throw new Error('成对 Swipe 楼层不存在，无法写入');
+    }
+
+    const userSwipes = Array.isArray(options.userSwipes)
+      ? options.userSwipes.map(item => String(item ?? ''))
+      : getMessageSwipeTexts(userMessage);
+    const assistantSwipes = Array.isArray(options.assistantSwipes)
+      ? options.assistantSwipes.map(item => String(item ?? ''))
+      : getMessageSwipeTexts(assistantMessage);
+    const nextBranchIds = Array.isArray(options.branchIds)
+      ? options.branchIds.map(item => String(item || '').trim()).filter(Boolean)
+      : state.branchIds.slice();
+    const targetCount = Math.max(userSwipes.length, assistantSwipes.length, nextBranchIds.length, 1);
+
+    while (nextBranchIds.length < targetCount) {
+      nextBranchIds.push(createPairedSwipeBranchId(state.pairId));
+    }
+    while (userSwipes.length < targetCount) {
+      userSwipes.push('');
+    }
+    while (assistantSwipes.length < targetCount) {
+      assistantSwipes.push('');
+    }
+
+    const currentUserSwipeId = Math.min(getCurrentSwipeIndex(userMessage), Math.max(0, targetCount - 1));
+    const currentAssistantSwipeId = Math.min(getCurrentSwipeIndex(assistantMessage), Math.max(0, targetCount - 1));
+    const nextUserSwipeId = Number.isFinite(Number(options.userSwipeId))
+      ? Math.min(Math.max(0, Math.floor(Number(options.userSwipeId))), Math.max(0, targetCount - 1))
+      : currentUserSwipeId;
+    const nextAssistantSwipeId = Number.isFinite(Number(options.assistantSwipeId))
+      ? Math.min(Math.max(0, Math.floor(Number(options.assistantSwipeId))), Math.max(0, targetCount - 1))
+      : currentAssistantSwipeId;
+
+    state.branchIds = nextBranchIds.slice();
+    state.activeBranchIndex = Math.min(nextAssistantSwipeId, Math.max(0, targetCount - 1));
+    state.statusByBranchId = normalizePairedSwipeStatuses(options.statuses ?? state.statusByBranchId);
+    for (const branchId of state.branchIds) {
+      if (!state.statusByBranchId[branchId]) {
+        state.statusByBranchId[branchId] = 'done';
+      }
+    }
+
+    await setChatMessages(
+      [
+        {
+          message_id: Number(userMessage.message_id),
+          swipes: userSwipes,
+          swipe_id: nextUserSwipeId,
+          extra: buildPairedSwipeExtra(userMessage, state, 'user'),
+        },
+        {
+          message_id: Number(assistantMessage.message_id),
+          swipes: assistantSwipes,
+          swipe_id: nextAssistantSwipeId,
+          extra: buildPairedSwipeExtra(assistantMessage, state, 'assistant', state.statusByBranchId),
+        },
+      ],
+      { refresh: 'affected' },
+    );
+
+    pairedSwipeStates.set(state.pairId, state);
+    scheduleOldFloorSwipeScan();
+    return state;
+  }
+
+  async function ensurePairedSwipeModeForLatestUser(userMessageId) {
+    const latestPair = findLatestUserAssistantPair();
+    if (!latestPair) {
+      throw new Error('未找到当前最后一对 user/assistant 楼层');
+    }
+
+    const latestUserId = Number(latestPair.userMessage.message_id);
+    const latestAssistantId = Number(latestPair.assistantMessage.message_id);
+    if (latestUserId !== Number(userMessageId)) {
+      throw new Error('只允许对当前最后一对楼层新增并行分支');
+    }
+
+    const existingState = getOrCreatePairedSwipeStateFromMessages(
+      latestPair.userMessage,
+      latestPair.assistantMessage,
+      { create: false },
+    );
+    if (existingState) {
+      if (!existingState.basePayloadSnapshot) {
+        existingState.basePayloadSnapshot = resolvePairedSwipeBasePayloadSnapshot(
+          latestPair.userMessage,
+          latestPair.assistantMessage,
+        );
+      }
+      pairedSwipeStates.set(existingState.pairId, existingState);
+      return existingState;
+    }
+
+    const basePayloadSnapshot = resolvePairedSwipeBasePayloadSnapshot(
+      latestPair.userMessage,
+      latestPair.assistantMessage,
+    );
+    if (!basePayloadSnapshot) {
+      throw new Error('当前会话缺少生成参数快照，无法创建并行分支');
+    }
+
+    const pairId = createPairedSwipePairId();
+    const branchId = createPairedSwipeBranchId(pairId);
+    const nextState = {
+      pairId,
+      userMessageId: latestUserId,
+      assistantMessageId: latestAssistantId,
+      branchIds: [branchId],
+      statusByBranchId: {
+        [branchId]: foregroundGenerationRunning ? 'pending' : 'done',
+      },
+      basePayloadSnapshot,
+      foregroundPending: Boolean(foregroundGenerationRunning),
+      activeBranchIndex: Math.min(
+        getCurrentSwipeIndex(latestPair.userMessage),
+        getCurrentSwipeIndex(latestPair.assistantMessage),
+      ),
+    };
+
+    await writePairedSwipeMessages(nextState, {
+      userSwipes: getMessageSwipeTexts(latestPair.userMessage),
+      assistantSwipes: getMessageSwipeTexts(latestPair.assistantMessage),
+      userSwipeId: getCurrentSwipeIndex(latestPair.userMessage),
+      assistantSwipeId: getCurrentSwipeIndex(latestPair.assistantMessage),
+      statuses: nextState.statusByBranchId,
+    });
+
+    cancelActiveParallelSupplementOnly('成对分支模式已接管当前消息对');
+    return nextState;
+  }
+
+  function replaceSendingMessageTextContent(content, nextText) {
+    if (Array.isArray(content)) {
+      let replaced = false;
+      const nextContent = [];
+      for (const item of content) {
+        if (item?.type === 'text') {
+          if (!replaced) {
+            nextContent.push({ ...item, text: nextText });
+            replaced = true;
+          }
+          continue;
+        }
+        nextContent.push(deepClone(item));
+      }
+      if (!replaced) {
+        nextContent.unshift({ type: 'text', text: nextText });
+      }
+      return nextContent;
+    }
+    return nextText;
+  }
+
+  function buildPairedBranchPayload(basePayloadSnapshot, userText, branchId) {
+    const payload = deepClone(basePayloadSnapshot || {});
+    if (!payload || typeof payload !== 'object' || !Array.isArray(payload.messages) || payload.messages.length === 0) {
+      throw new Error('并行分支缺少可用的 messages 上下文');
+    }
+
+    let targetUserIndex = -1;
+    for (let index = payload.messages.length - 1; index >= 0; index -= 1) {
+      if (payload.messages[index]?.role === 'user') {
+        targetUserIndex = index;
+        break;
+      }
+    }
+
+    if (targetUserIndex < 0) {
+      throw new Error('并行分支未找到最后一条 user prompt');
+    }
+
+    payload.stream = false;
+    payload.n = 1;
+    payload.generation_id = `paired_swipe_${branchId}_${Date.now()}`;
+    payload.messages[targetUserIndex] = {
+      ...payload.messages[targetUserIndex],
+      content: replaceSendingMessageTextContent(payload.messages[targetUserIndex].content, userText),
+    };
+    return payload;
+  }
+
+  async function updatePairedSwipeBranchResult(pairId, branchId, swipeIndex, text, options = {}) {
+    const state = pairedSwipeStates.get(pairId);
+    if (!state) return false;
+
+    const assistantMessage = readMessageById(state.assistantMessageId, false);
+    if (!assistantMessage) return false;
+
+    const assistantSwipes = getMessageSwipeTexts(assistantMessage);
+    while (assistantSwipes.length <= swipeIndex) {
+      assistantSwipes.push('');
+    }
+
+    const processedText = options.error
+      ? `分支生成失败：${String(text || 'unknown error')}`
+      : applyTavernAiOutputRegexes(String(text || '').trim(), { messageId: state.assistantMessageId }).trim();
+
+    assistantSwipes[swipeIndex] = processedText || (options.error ? '分支生成失败：返回为空' : PAIRED_SWIPE_PENDING_TEXT);
+    state.statusByBranchId = normalizePairedSwipeStatuses(state.statusByBranchId);
+    state.statusByBranchId[branchId] = options.error ? 'error' : 'done';
+
+    await writePairedSwipeMessages(state, {
+      assistantSwipes,
+      statuses: state.statusByBranchId,
+    });
+
+    return true;
+  }
+
+  async function runPairedSwipeBranchJob(pairId, branchId, swipeIndex, userText) {
+    const state = pairedSwipeStates.get(pairId);
+    if (!state) {
+      throw new Error('并行分支状态不存在');
+    }
+    if (!state.basePayloadSnapshot) {
+      throw new Error('并行分支缺少生成快照');
+    }
+
+    const controller = new AbortController();
+    const job = {
+      pairId,
+      branchId,
+      swipeIndex,
+      controller,
+      userText,
+    };
+    pairedSwipeJobs.set(branchId, job);
+
+    try {
+      const payload = buildPairedBranchPayload(state.basePayloadSnapshot, userText, branchId);
+      const result = await requestSingleCompletionWithRetry({
+        payload,
+        signal: controller.signal,
+        requestName: `分支 ${swipeIndex + 1}`,
+        retryScope: `分支#${swipeIndex + 1}`,
+      });
+      await updatePairedSwipeBranchResult(pairId, branchId, swipeIndex, result.text, { error: false });
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        warn('并行分支生成失败:', error);
+        await updatePairedSwipeBranchResult(pairId, branchId, swipeIndex, error?.message || String(error), { error: true });
+      }
+    } finally {
+      pairedSwipeJobs.delete(branchId);
+      scheduleOldFloorSwipeScan();
+    }
+  }
+
+  async function createPairedSwipeBranch(userMessageId, rawText) {
+    const nextText = String(rawText || '').trim();
+    if (!nextText) {
+      throw new Error('请输入新的分支内容');
+    }
+
+    const state = await ensurePairedSwipeModeForLatestUser(userMessageId);
+    const userMessage = readMessageById(state.userMessageId, false);
+    const assistantMessage = readMessageById(state.assistantMessageId, false);
+    if (!userMessage || !assistantMessage) {
+      throw new Error('成对 Swipe 楼层不存在');
+    }
+
+    const userSwipes = getMessageSwipeTexts(userMessage);
+    const assistantSwipes = getMessageSwipeTexts(assistantMessage);
+    const nextBranchId = createPairedSwipeBranchId(state.pairId);
+    const nextSwipeIndex = userSwipes.length;
+
+    userSwipes.push(nextText);
+    assistantSwipes.push(PAIRED_SWIPE_PENDING_TEXT);
+    state.branchIds = state.branchIds.concat(nextBranchId);
+    state.statusByBranchId = normalizePairedSwipeStatuses(state.statusByBranchId);
+    state.statusByBranchId[nextBranchId] = 'pending';
+
+    const keepCurrentSelection = Boolean(state.foregroundPending);
+    await writePairedSwipeMessages(state, {
+      branchIds: state.branchIds,
+      userSwipes,
+      assistantSwipes,
+      userSwipeId: keepCurrentSelection ? getCurrentSwipeIndex(userMessage) : nextSwipeIndex,
+      assistantSwipeId: keepCurrentSelection ? getCurrentSwipeIndex(assistantMessage) : nextSwipeIndex,
+      statuses: state.statusByBranchId,
+    });
+
+    clearPairedSwipeComposerState();
+    void runPairedSwipeBranchJob(state.pairId, nextBranchId, nextSwipeIndex, nextText);
+    return {
+      pairId: state.pairId,
+      branchId: nextBranchId,
+      swipeIndex: nextSwipeIndex,
+    };
+  }
+
+  function getPairedSwipeStatusSummary(state) {
+    const statuses = normalizePairedSwipeStatuses(state?.statusByBranchId);
+    let pending = 0;
+    let error = 0;
+    for (const status of Object.values(statuses)) {
+      if (status === 'pending') pending += 1;
+      if (status === 'error') error += 1;
+    }
+    return { pending, error };
+  }
+
+  function canAppendPairedSwipeBranch(userMessageId) {
+    const pairedState = getPairedSwipeStateByMessageId(userMessageId);
+    if (pairedState) {
+      return isLatestPairedSwipeTarget(pairedState.userMessageId, pairedState.assistantMessageId);
+    }
+
+    const latestPair = findLatestUserAssistantPair();
+    if (!latestPair) return false;
+    return Number(latestPair.userMessage?.message_id) === Number(userMessageId);
+  }
+
+  async function persistLatestPairedSwipePayloadSnapshot(assistantMessageId = null) {
+    const latestPair = findLatestUserAssistantPair();
+    if (!latestPair) {
+      return false;
+    }
+
+    const latestAssistantId = Number(latestPair.assistantMessage?.message_id);
+    if (assistantMessageId !== null && latestAssistantId !== Number(assistantMessageId)) {
+      return false;
+    }
+
+    const payloadSnapshot = resolvePairedSwipeBasePayloadSnapshot(
+      latestPair.userMessage,
+      latestPair.assistantMessage,
+    );
+    if (!payloadSnapshot) {
+      return false;
+    }
+
+    const nextAssistantExtra = cloneExtra(latestPair.assistantMessage?.extra);
+    nextAssistantExtra[PAIRED_SWIPE_PAYLOAD_KEY] = payloadSnapshot;
+    await setChatMessages(
+      [{ message_id: latestAssistantId, extra: nextAssistantExtra }],
+      { refresh: 'affected' },
+    );
+
+    const pairedState = getOrCreatePairedSwipeStateFromMessages(
+      latestPair.userMessage,
+      latestPair.assistantMessage,
+      { create: false },
+    );
+    if (pairedState) {
+      pairedState.basePayloadSnapshot = payloadSnapshot;
+      pairedSwipeStates.set(pairedState.pairId, pairedState);
+    }
+
+    return true;
+  }
+
+  async function syncPairedSwipeIndex(messageId, nextSwipeIndex) {
+    const state = getPairedSwipeStateByMessageId(messageId);
+    if (!state || state.foregroundPending) {
+      return false;
+    }
+
+    const syncKey = state.pairId;
+    if (pairedSwipeSyncLocks.has(syncKey)) {
+      return false;
+    }
+
+    const userMessage = readMessageById(state.userMessageId, false);
+    const assistantMessage = readMessageById(state.assistantMessageId, false);
+    if (!userMessage || !assistantMessage) return false;
+
+    const branchCount = Math.max(
+      getMessageSwipeTexts(userMessage).length,
+      getMessageSwipeTexts(assistantMessage).length,
+      state.branchIds.length,
+      1,
+    );
+    const clampedSwipeIndex = Math.min(Math.max(0, Math.floor(Number(nextSwipeIndex) || 0)), Math.max(0, branchCount - 1));
+
+    pairedSwipeSyncLocks.add(syncKey);
+    try {
+      await setChatMessages(
+        [
+          { message_id: state.userMessageId, swipe_id: clampedSwipeIndex },
+          { message_id: state.assistantMessageId, swipe_id: clampedSwipeIndex },
+        ],
+        { refresh: 'affected' },
+      );
+      state.activeBranchIndex = clampedSwipeIndex;
+      pairedSwipeStates.set(state.pairId, state);
+      scheduleOldFloorSwipeScan();
+      return true;
+    } finally {
+      pairedSwipeSyncLocks.delete(syncKey);
+    }
+  }
+
+  function markLatestPairedSwipeForegroundPending(pending, assistantMessageId = null) {
+    for (const state of pairedSwipeStates.values()) {
+      if (assistantMessageId !== null && Number(state.assistantMessageId) !== Number(assistantMessageId)) {
+        continue;
+      }
+      if (assistantMessageId === null && !isLatestPairedSwipeTarget(state.userMessageId, state.assistantMessageId)) {
+        continue;
+      }
+      state.foregroundPending = Boolean(pending);
+      const firstBranchId = state.branchIds[0];
+      if (firstBranchId) {
+        state.statusByBranchId[firstBranchId] = pending
+          ? 'pending'
+          : state.statusByBranchId[firstBranchId] === 'error'
+            ? 'error'
+            : 'done';
+      }
+      pairedSwipeStates.set(state.pairId, state);
+    }
+  }
+
+  async function onPairedSwipeMessageSwiped(messageId) {
+    const state = getPairedSwipeStateByMessageId(messageId);
+    if (!state || state.foregroundPending) {
+      return;
+    }
+
+    const sourceMessage = readMessageById(messageId, false);
+    if (!sourceMessage) return;
+    await syncPairedSwipeIndex(messageId, getCurrentSwipeIndex(sourceMessage));
+  }
+
   // =====================================================================
   //  第3部分：旧楼层 Swipe 模块
   // =====================================================================
@@ -5525,6 +6551,7 @@
     let streamUpdateTimer = null;
     let scanTimer = null;
     let streamHandlerBound = false;
+    let pairedUiHandlerBound = false;
 
     function getDoc() {
       return getHostDocument();
@@ -5553,6 +6580,7 @@
         .old-floor-swipe-container {
           display: flex;
           align-items: center;
+          flex-wrap: wrap;
           gap: 8px;
           margin-top: 8px;
           padding: 4px 0;
@@ -5578,6 +6606,11 @@
         .old-floor-swipe-btn:active {
           transform: scale(0.95);
         }
+        .old-floor-swipe-btn.is-disabled {
+          opacity: 0.45;
+          cursor: not-allowed;
+          pointer-events: none;
+        }
         .old-floor-swipe-counter {
           font-size: 12px;
           color: var(--SmartThemeQuoteColor, #888);
@@ -5595,6 +6628,97 @@
           0% { transform: rotate(0deg); }
           100% { transform: rotate(360deg); }
         }
+        .${PAIRED_SWIPE_USER_CONTAINER_CLASS} {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 8px;
+          margin-top: 8px;
+          padding: 4px 0;
+        }
+        .${PAIRED_SWIPE_BRANCH_BUTTON_CLASS},
+        .${PAIRED_SWIPE_COMPOSER_CONFIRM_CLASS},
+        .${PAIRED_SWIPE_COMPOSER_CANCEL_CLASS} {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          min-height: 30px;
+          padding: 4px 12px;
+          border-radius: 6px;
+          border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.28));
+          background: var(--SmartThemeBlurTintColor, rgba(20, 24, 32, 0.92));
+          color: var(--SmartThemeBodyColor, #f5f7fa);
+          font-size: 12px;
+          line-height: 1.3;
+          cursor: pointer;
+          transition: background-color 0.2s ease, border-color 0.2s ease, opacity 0.2s ease;
+        }
+        .${PAIRED_SWIPE_BRANCH_BUTTON_CLASS}:hover,
+        .${PAIRED_SWIPE_COMPOSER_CONFIRM_CLASS}:hover,
+        .${PAIRED_SWIPE_COMPOSER_CANCEL_CLASS}:hover {
+          background: rgba(255, 255, 255, 0.12);
+          border-color: var(--SmartThemeEmColor, #9ac7ff);
+        }
+        .${PAIRED_SWIPE_STATUS_TEXT_CLASS} {
+          font-size: 12px;
+          color: var(--SmartThemeBodyColor, #f5f7fa);
+          opacity: 0.88;
+        }
+        .${PAIRED_SWIPE_STATUS_TEXT_CLASS}.${PAIRED_SWIPE_PLACEHOLDER_CLASS} {
+          color: var(--SmartThemeEmColor, #9ac7ff);
+        }
+        .${PAIRED_SWIPE_STATUS_TEXT_CLASS}.${PAIRED_SWIPE_ERROR_CLASS} {
+          color: #ff9d9d;
+        }
+        .${PAIRED_SWIPE_COMPOSER_CLASS} {
+          display: none;
+          flex-direction: column;
+          gap: 8px;
+          width: 100%;
+          margin-top: 8px;
+          padding: 10px;
+          border-radius: 10px;
+          border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.28));
+          background: var(--SmartThemeBlurTintColor, rgba(20, 24, 32, 0.92));
+          box-sizing: border-box;
+        }
+        .${PAIRED_SWIPE_COMPOSER_CLASS}.${PAIRED_SWIPE_COMPOSER_OPEN_CLASS} {
+          display: flex;
+        }
+        .${PAIRED_SWIPE_COMPOSER_TEXTAREA_CLASS} {
+          width: 100%;
+          min-height: 88px;
+          resize: vertical;
+          padding: 10px 12px;
+          border-radius: 8px;
+          border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.28));
+          background: rgba(12, 15, 22, 0.88);
+          color: var(--SmartThemeBodyColor, #f5f7fa);
+          box-sizing: border-box;
+          outline: none;
+        }
+        .${PAIRED_SWIPE_COMPOSER_TEXTAREA_CLASS}::placeholder {
+          color: rgba(245, 247, 250, 0.62);
+        }
+        .${PAIRED_SWIPE_COMPOSER_TEXTAREA_CLASS}:focus {
+          border-color: var(--SmartThemeEmColor, #9ac7ff);
+          box-shadow: 0 0 0 1px var(--SmartThemeEmColor, #9ac7ff), 0 0 10px rgba(154, 199, 255, 0.28);
+        }
+        .${PAIRED_SWIPE_COMPOSER_ACTIONS_CLASS} {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+        .${PAIRED_SWIPE_COMPOSER_FEEDBACK_CLASS} {
+          min-height: 18px;
+          font-size: 12px;
+          color: var(--SmartThemeBodyColor, #f5f7fa);
+          opacity: 0.88;
+        }
+        .${PAIRED_SWIPE_COMPOSER_FEEDBACK_CLASS}.${PAIRED_SWIPE_ERROR_CLASS} {
+          color: #ff9d9d;
+        }
       `;
       (doc.head || doc.body)?.appendChild(style);
       return true;
@@ -5609,7 +6733,8 @@
     function removeButtons() {
       const doc = getDoc();
       if (!doc) return;
-      doc.querySelectorAll('.old-floor-swipe-container').forEach(node => node.remove());
+      doc.querySelectorAll(`.old-floor-swipe-container, .${PAIRED_SWIPE_USER_CONTAINER_CLASS}, .${PAIRED_SWIPE_COMPOSER_CLASS}`)
+        .forEach(node => node.remove());
     }
 
     function updateStreamingMessage(streamedText) {
@@ -5671,6 +6796,13 @@
     }
 
     function bindEvents() {
+      if (!pairedUiHandlerBound) {
+        const doc = getDoc();
+        if (doc) {
+          doc.addEventListener('click', onPairedUiClick, true);
+          pairedUiHandlerBound = true;
+        }
+      }
       if (streamHandlerBound) return;
       if (typeof iframe_events === 'undefined' || !iframe_events.STREAM_TOKEN_RECEIVED_FULLY) {
         debug('旧楼层 Swipe: STREAM_TOKEN_RECEIVED_FULLY 不可用，跳过流式绑定');
@@ -5685,8 +6817,248 @@
       return applyTavernAiOutputRegexes(text, { messageId, depth });
     }
 
+    function setSwipeButtonDisabled(button, disabled) {
+      if (!button) return;
+      button.classList.toggle('is-disabled', Boolean(disabled));
+      button.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+    }
+
+    function getPairedSwipeStatusDescriptor(messageId) {
+      const state = getPairedSwipeStateByMessageId(messageId);
+      if (!state) {
+        return {
+          text: foregroundGenerationRunning && canAppendPairedSwipeBranch(messageId)
+            ? '主分支生成中，可新增并行分支'
+            : '可新增并行分支',
+          isError: false,
+          isPending: foregroundGenerationRunning && canAppendPairedSwipeBranch(messageId),
+        };
+      }
+
+      const summary = getPairedSwipeStatusSummary(state);
+      if (state.foregroundPending && summary.pending > 1) {
+        return {
+          text: `主分支生成中，另有 ${summary.pending - 1} 个分支生成中`,
+          isError: false,
+          isPending: true,
+        };
+      }
+      if (state.foregroundPending) {
+        return {
+          text: '主分支生成中',
+          isError: false,
+          isPending: true,
+        };
+      }
+      if (summary.pending > 0) {
+        return {
+          text: `${summary.pending} 个分支生成中`,
+          isError: false,
+          isPending: true,
+        };
+      }
+      if (summary.error > 0) {
+        return {
+          text: `${summary.error} 个分支失败`,
+          isError: true,
+          isPending: false,
+        };
+      }
+
+      return {
+        text: `共 ${Math.max(1, state.branchIds.length)} 个分支`,
+        isError: false,
+        isPending: false,
+      };
+    }
+
+    function createPairedSwipeComposer(messageId, updateUI) {
+      const doc = getDoc();
+      if (!doc) return null;
+
+      const composer = doc.createElement('div');
+      composer.className = `${PAIRED_SWIPE_COMPOSER_CLASS} ${PAIRED_SWIPE_COMPOSER_OPEN_CLASS}`;
+
+      const textarea = doc.createElement('textarea');
+      textarea.className = PAIRED_SWIPE_COMPOSER_TEXTAREA_CLASS;
+      textarea.placeholder = '输入新的并行分支内容';
+      textarea.value = pairedSwipeComposerUserMessageId === messageId ? pairedSwipeComposerDraft : '';
+      textarea.addEventListener('input', () => {
+        pairedSwipeComposerUserMessageId = messageId;
+        pairedSwipeComposerDraft = textarea.value;
+      });
+
+      const actions = doc.createElement('div');
+      actions.className = PAIRED_SWIPE_COMPOSER_ACTIONS_CLASS;
+
+      const confirmButton = doc.createElement('button');
+      confirmButton.type = 'button';
+      confirmButton.className = PAIRED_SWIPE_COMPOSER_CONFIRM_CLASS;
+      confirmButton.textContent = '开始并行生成';
+
+      const cancelButton = doc.createElement('button');
+      cancelButton.type = 'button';
+      cancelButton.className = PAIRED_SWIPE_COMPOSER_CANCEL_CLASS;
+      cancelButton.textContent = '取消';
+
+      const feedback = doc.createElement('div');
+      feedback.className = PAIRED_SWIPE_COMPOSER_FEEDBACK_CLASS;
+
+      confirmButton.addEventListener('click', async () => {
+        confirmButton.disabled = true;
+        cancelButton.disabled = true;
+        feedback.textContent = '正在创建分支...';
+        feedback.classList.remove(PAIRED_SWIPE_ERROR_CLASS);
+        try {
+          await createPairedSwipeBranch(messageId, textarea.value);
+          if (typeof updateUI === 'function') {
+            updateUI();
+          }
+        } catch (error) {
+          feedback.textContent = error?.message || '创建分支失败';
+          feedback.classList.add(PAIRED_SWIPE_ERROR_CLASS);
+          confirmButton.disabled = false;
+          cancelButton.disabled = false;
+          return;
+        }
+        scheduleScan();
+      });
+
+      cancelButton.addEventListener('click', () => {
+        clearPairedSwipeComposerState();
+        scheduleScan();
+      });
+
+      actions.append(confirmButton, cancelButton);
+      composer.append(textarea, actions, feedback);
+      return composer;
+    }
+
+    function addUserPairControlsToMessage(mesElement) {
+      const messageId = parseInt(mesElement?.getAttribute('mesid') || '', 10);
+      if (!Number.isFinite(messageId)) return;
+      if (mesElement.getAttribute('is_user') !== 'true') return;
+
+      const mesBlock = mesElement.querySelector('.mes_block');
+      if (!mesBlock) return;
+
+      const pairedState = getPairedSwipeStateByMessageId(messageId);
+      const canAppendBranch = canAppendPairedSwipeBranch(messageId);
+      const shouldShowComposer = canAppendBranch || pairedSwipeComposerUserMessageId === messageId;
+      const existingComposer = mesBlock.querySelector(`.${PAIRED_SWIPE_COMPOSER_CLASS}`);
+      const preserveComposer = Boolean(existingComposer && shouldShowComposer);
+
+      mesBlock.querySelector(`.${PAIRED_SWIPE_USER_CONTAINER_CLASS}`)?.remove();
+      if (!preserveComposer) {
+        existingComposer?.remove();
+      }
+
+      if (!pairedState && !canAppendBranch) {
+        return;
+      }
+
+      const doc = getDoc();
+      if (!doc) return;
+      const userMessage = readMessageById(messageId, false);
+      if (!userMessage) return;
+
+      const swipeTexts = getMessageSwipeTexts(userMessage);
+      const swipeCount = Math.max(
+        swipeTexts.length,
+        pairedState?.branchIds?.length || 1,
+      );
+      const currentSwipeId = Math.min(getCurrentSwipeIndex(userMessage), Math.max(0, swipeCount - 1));
+      const controls = doc.createElement('div');
+      controls.className = PAIRED_SWIPE_USER_CONTAINER_CLASS;
+
+      const leftBtn = doc.createElement('div');
+      leftBtn.className = 'old-floor-swipe-btn';
+      leftBtn.innerHTML = '<i class="fa-solid fa-chevron-left"></i>';
+      leftBtn.title = '上一分支';
+
+      const counter = doc.createElement('span');
+      counter.className = 'old-floor-swipe-counter';
+      counter.textContent = `${currentSwipeId + 1}/${Math.max(1, swipeCount)}`;
+
+      const rightBtn = doc.createElement('div');
+      rightBtn.className = 'old-floor-swipe-btn';
+      rightBtn.innerHTML = '<i class="fa-solid fa-chevron-right"></i>';
+      rightBtn.title = '下一分支';
+
+      const statusText = doc.createElement('span');
+      statusText.className = PAIRED_SWIPE_STATUS_TEXT_CLASS;
+      const statusDescriptor = getPairedSwipeStatusDescriptor(messageId);
+      statusText.textContent = statusDescriptor.text;
+      statusText.classList.toggle(PAIRED_SWIPE_PLACEHOLDER_CLASS, statusDescriptor.isPending);
+      statusText.classList.toggle(PAIRED_SWIPE_ERROR_CLASS, statusDescriptor.isError);
+
+      const updateUI = () => {
+        try {
+          scheduleScan();
+        } catch {
+          // ignore
+        }
+      };
+
+      const disableSwipeButtons = !pairedState || pairedState.foregroundPending || swipeCount <= 1;
+      setSwipeButtonDisabled(leftBtn, disableSwipeButtons || currentSwipeId <= 0);
+      setSwipeButtonDisabled(rightBtn, disableSwipeButtons || currentSwipeId >= swipeCount - 1);
+
+      leftBtn.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (disableSwipeButtons || currentSwipeId <= 0) return;
+        void syncPairedSwipeIndex(messageId, currentSwipeId - 1);
+      });
+
+      rightBtn.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (disableSwipeButtons || currentSwipeId >= swipeCount - 1) return;
+        void syncPairedSwipeIndex(messageId, currentSwipeId + 1);
+      });
+
+      controls.append(leftBtn, counter, rightBtn, statusText);
+      const focusComposerTextarea = (composerNode) => {
+        const textarea = composerNode?.querySelector?.(`.${PAIRED_SWIPE_COMPOSER_TEXTAREA_CLASS}`);
+        if (!textarea || typeof textarea.focus !== 'function') {
+          return;
+        }
+        setTimeout(() => {
+          textarea.focus();
+          if (typeof textarea.setSelectionRange === 'function') {
+            const textLength = String(textarea.value || '').length;
+            textarea.setSelectionRange(textLength, textLength);
+          }
+        }, 0);
+      };
+
+      mesBlock.appendChild(controls);
+
+      if (!preserveComposer && shouldShowComposer) {
+        const composer = createPairedSwipeComposer(messageId, updateUI);
+        if (composer) {
+          mesBlock.appendChild(composer);
+          if (pairedSwipeComposerUserMessageId === messageId) {
+            focusComposerTextarea(composer);
+          }
+        }
+      }
+    }
+
     async function swipeLeft(messageId, updateUI) {
       if (isGenerating) return;
+      const pairedState = getPairedSwipeStateByMessageId(messageId);
+      if (pairedState) {
+        const message = readMessageById(messageId, false);
+        if (!message) return;
+        const currentSwipeId = getCurrentSwipeIndex(message);
+        if (currentSwipeId > 0) {
+          await syncPairedSwipeIndex(messageId, currentSwipeId - 1);
+          if (typeof updateUI === 'function') setTimeout(updateUI, 100);
+        }
+        return;
+      }
       try {
         const msgs = getChatMessages(messageId, { include_swipes: true });
         if (!msgs || msgs.length === 0) return;
@@ -5704,6 +7076,22 @@
 
     async function swipeRight(messageId, updateUI, rightBtn) {
       if (isGenerating) return;
+      const pairedState = getPairedSwipeStateByMessageId(messageId);
+      if (pairedState) {
+        const message = readMessageById(messageId, false);
+        if (!message) return;
+        const swipeCount = Math.max(
+          getMessageSwipeTexts(message).length,
+          pairedState.branchIds.length,
+          1,
+        );
+        const currentSwipeId = getCurrentSwipeIndex(message);
+        if (currentSwipeId < swipeCount - 1) {
+          await syncPairedSwipeIndex(messageId, currentSwipeId + 1);
+          if (typeof updateUI === 'function') setTimeout(updateUI, 100);
+        }
+        return;
+      }
       try {
         const msgs = getChatMessages(messageId, { include_swipes: true });
         if (!msgs || msgs.length === 0) return;
@@ -5801,6 +7189,7 @@
       if (mesElement.getAttribute('is_user') === 'true') return;
       if (mesElement.classList.contains('last_mes')) return;
       if (mesElement.querySelector('.old-floor-swipe-container')) return;
+      const pairedState = getPairedSwipeStateByMessageId(messageId);
 
       let swipeInfo = { current: 1, total: 1 };
       try {
@@ -5832,7 +7221,7 @@
       const rightBtn = doc.createElement('div');
       rightBtn.className = 'old-floor-swipe-btn';
       rightBtn.innerHTML = '<i class="fa-solid fa-chevron-right"></i>';
-      rightBtn.title = '下一个回复 / 生成新回复';
+      rightBtn.title = pairedState ? '下一个分支' : '下一个回复 / 生成新回复';
 
       const updateUI = () => {
         try {
@@ -5871,7 +7260,10 @@
       if (!initialized) return;
       const doc = getDoc();
       if (!doc) return;
-      doc.querySelectorAll('.mes:not(.last_mes)').forEach(addSwipeButtonsToMessage);
+      doc.querySelectorAll('.mes').forEach((mesElement) => {
+        addSwipeButtonsToMessage(mesElement);
+        addUserPairControlsToMessage(mesElement);
+      });
     }
 
     function scheduleScan() {
@@ -5881,6 +7273,67 @@
         scanTimer = null;
         scanAndAddButtons();
       }, 50);
+    }
+
+    function onPairedUiClick(event) {
+      const target = getEventTargetElement(event);
+      if (!target || typeof target.closest !== 'function') {
+        return;
+      }
+
+      const branchButton = target.closest(`.${PAIRED_SWIPE_BRANCH_BUTTON_CLASS}`);
+      if (!branchButton) {
+        return;
+      }
+
+      const rawMessageId = branchButton.getAttribute('data-message-id')
+        || branchButton.closest('.mes')?.getAttribute('mesid')
+        || '';
+      const messageId = parseInt(rawMessageId, 10);
+      if (!Number.isFinite(messageId)) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === 'function') {
+        event.stopImmediatePropagation();
+      }
+
+      const doc = getDoc();
+      const mesElement = doc?.querySelector(`.mes[mesid="${messageId}"]`);
+      const mesBlock = mesElement?.querySelector('.mes_block');
+      if (!mesBlock) {
+        return;
+      }
+
+      const existingComposer = mesBlock.querySelector(`.${PAIRED_SWIPE_COMPOSER_CLASS}`);
+      if (pairedSwipeComposerUserMessageId === messageId && existingComposer) {
+        clearPairedSwipeComposerState();
+        existingComposer.remove();
+        scheduleScan();
+        return;
+      }
+
+      pairedSwipeComposerUserMessageId = messageId;
+      doc.querySelectorAll(`.${PAIRED_SWIPE_COMPOSER_CLASS}`).forEach(node => node.remove());
+
+      const composer = createPairedSwipeComposer(messageId, () => scheduleScan());
+      if (composer) {
+        mesBlock.appendChild(composer);
+        const textarea = composer.querySelector(`.${PAIRED_SWIPE_COMPOSER_TEXTAREA_CLASS}`);
+        if (textarea && typeof textarea.focus === 'function') {
+          setTimeout(() => {
+            textarea.focus();
+            if (typeof textarea.setSelectionRange === 'function') {
+              const textLength = String(textarea.value || '').length;
+              textarea.setSelectionRange(textLength, textLength);
+            }
+          }, 0);
+        }
+      }
+
+      scheduleScan();
     }
 
     function init() {
@@ -5897,6 +7350,11 @@
       isGenerating = false;
       currentStreamingMessageId = null;
       streamHandlerBound = false;
+      if (pairedUiHandlerBound) {
+        const doc = getDoc();
+        doc?.removeEventListener('click', onPairedUiClick, true);
+        pairedUiHandlerBound = false;
+      }
       flushStreamUpdate();
       if (scanTimer) {
         clearTimeout(scanTimer);
@@ -8436,8 +9894,8 @@
       if (!config.pinnedWorldbooks) config.pinnedWorldbooks = [];
       if (isPinned) {
         config.pinnedWorldbooks = config.pinnedWorldbooks.filter(wb => wb !== wbName);
-      } else {
-        if (!config.pinnedWorldbooks.includes(wbName)) config.pinnedWorldbooks.push(wbName);
+      } else if (!config.pinnedWorldbooks.includes(wbName)) {
+        config.pinnedWorldbooks.push(wbName);
       }
       saveWorldbookSwitcherConfig(config);
       // 刷新面板
@@ -9045,8 +10503,8 @@
       if (!config.pinnedWorldbooks) config.pinnedWorldbooks = [];
       if (isPinned) {
         config.pinnedWorldbooks = config.pinnedWorldbooks.filter(wb => wb !== wbName);
-      } else {
-        if (!config.pinnedWorldbooks.includes(wbName)) config.pinnedWorldbooks.push(wbName);
+      } else if (!config.pinnedWorldbooks.includes(wbName)) {
+        config.pinnedWorldbooks.push(wbName);
       }
       saveWorldbookSwitcherConfig(config);
       // 刷新面板 - 保持在世界书面板(0)
@@ -9351,9 +10809,11 @@
     bindEvent(tavern_events.GENERATION_STARTED, onGenerationStarted);
     bindEvent(tavern_events.MESSAGE_SENT, onMessageSent);
     bindEvent(tavern_events.MESSAGE_RECEIVED, onMessageReceived);
+    bindEvent(tavern_events.MESSAGE_SWIPED, onPairedSwipeMessageSwiped);
     bindEvent(tavern_events.CHAT_COMPLETION_SETTINGS_READY, onChatCompletionSettingsReady);
     bindEvent(tavern_events.GENERATION_STOPPED, onGenerationStopped);
     bindEvent(tavern_events.GENERATION_ENDED, onGenerationEnded);
+    bindEvent(tavern_events.CHAT_CHANGED, () => clearPairedSwipeRuntimeState());
 
     if (typeof iframe_events !== 'undefined' && iframe_events.GENERATION_STARTED) {
       bindEvent(iframe_events.GENERATION_STARTED, onIframeGenerationStarted);
@@ -9369,9 +10829,11 @@
       'GENERATION_STARTED',
       'MESSAGE_SENT',
       'MESSAGE_RECEIVED',
+      'MESSAGE_SWIPED',
       'CHAT_COMPLETION_SETTINGS_READY',
       'GENERATION_STOPPED',
       'GENERATION_ENDED',
+      'CHAT_CHANGED',
     ];
 
     if (typeof iframe_events !== 'undefined' && iframe_events.GENERATION_STARTED) {
@@ -9579,6 +11041,8 @@
     runSafe('中止并发任务', () => abortActiveJob('脚本实例销毁'));
     runSafe('中止前台校验', () => abortForegroundValidation('脚本实例销毁'));
     activeForegroundSession = null;
+    foregroundGenerationRunning = false;
+    runSafe('清理成对分支状态', () => clearPairedSwipeRuntimeState());
     runSafe('移除状态栏', () => removeAllParallelStatusBars());
     runSafe('清理前台重试补丁', () => cleanupGenerateFetchRetryPatch());
 
