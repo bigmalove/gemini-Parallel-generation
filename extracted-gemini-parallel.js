@@ -5496,6 +5496,16 @@
     });
 
     try {
+      if (hasInternalGenerateRequestInFlight()) {
+        debug('跳过本次并发初始化：内部静默生成请求', {
+          n: Number(generateData?.n),
+          source,
+          generationType,
+          inFlight: internalGenerateRequestInFlight,
+        });
+        return;
+      }
+
       if (activeJob && !isJobTerminal(activeJob)) {
         debug('跳过本次并发初始化：已有进行中任务', { activeJob: summarizeJob(activeJob) });
         return;
@@ -5632,6 +5642,12 @@
   function onGenerationStopped() {
     const job = activeJob;
     debug('收到 GENERATION_STOPPED', { activeJob: summarizeJob(job) });
+    if (hasInternalGenerateRequestInFlight()) {
+      debug('忽略脚本内部静默请求触发的 GENERATION_STOPPED', {
+        inFlight: internalGenerateRequestInFlight,
+      });
+      return;
+    }
     foregroundGenerationRunning = false;
     abortForegroundValidation('收到 GENERATION_STOPPED');
     if (activeForegroundSession) {
@@ -5661,6 +5677,13 @@
   function onGenerationEnded(messageId) {
     const job = activeJob;
     debug('收到 GENERATION_ENDED', { messageId, activeJob: summarizeJob(job) });
+    if (hasInternalGenerateRequestInFlight()) {
+      debug('忽略脚本内部静默请求触发的 GENERATION_ENDED', {
+        messageId,
+        inFlight: internalGenerateRequestInFlight,
+      });
+      return;
+    }
     const targetMessageId = resolveEndedAssistantMessageId(messageId);
     foregroundGenerationRunning = false;
     if (activeForegroundSession) {
@@ -5771,6 +5794,39 @@
       return message.swipes.map(item => String(item ?? ''));
     }
     return [String(message?.message ?? '')];
+  }
+
+  function getMessageActiveText(message) {
+    const swipeTexts = getMessageSwipeTexts(message);
+    const maxIndex = Math.max(0, swipeTexts.length - 1);
+    const swipeIndex = Math.min(getCurrentSwipeIndex(message), maxIndex);
+    return String(swipeTexts[swipeIndex] ?? message?.message ?? '');
+  }
+
+  function buildPairedBranchHistoryPromptsBefore(userMessageId) {
+    if (typeof getChatMessages !== 'function') {
+      return [];
+    }
+
+    const numericMessageId = Number(userMessageId);
+    if (!Number.isFinite(numericMessageId) || numericMessageId <= 0) {
+      return [];
+    }
+
+    const historyMessages = getChatMessages(`0-${Math.floor(numericMessageId) - 1}`, {
+      hide_state: 'all',
+      include_swipes: true,
+    });
+    if (!Array.isArray(historyMessages) || historyMessages.length === 0) {
+      return [];
+    }
+
+    return historyMessages
+      .filter(message => message && message.role && message.role !== 'system')
+      .map(message => ({
+        role: message.role,
+        content: getMessageActiveText(message),
+      }));
   }
 
   function normalizePairedSwipeStatuses(rawStatuses) {
@@ -6208,9 +6264,6 @@
       latestPair.userMessage,
       latestPair.assistantMessage,
     );
-    if (!basePayloadSnapshot) {
-      throw new Error('当前会话缺少生成参数快照，无法创建并行分支');
-    }
 
     const pairId = createPairedSwipePairId();
     const branchId = createPairedSwipeBranchId(pairId);
@@ -6325,29 +6378,55 @@
     if (!state) {
       throw new Error('并行分支状态不存在');
     }
-    if (!state.basePayloadSnapshot) {
-      throw new Error('并行分支缺少生成快照');
+    if (typeof generate !== 'function') {
+      throw new Error('酒馆 generate API 不可用，无法创建并行分支');
     }
 
     const controller = new AbortController();
+    const generationId = `paired_swipe_${branchId}_${Date.now()}`;
     const job = {
       pairId,
       branchId,
       swipeIndex,
       controller,
       userText,
+      generationId,
     };
     pairedSwipeJobs.set(branchId, job);
 
     try {
-      const payload = buildPairedBranchPayload(state.basePayloadSnapshot, userText, branchId);
-      const result = await requestSingleCompletionWithRetry({
-        payload,
-        signal: controller.signal,
-        requestName: `分支 ${swipeIndex + 1}`,
-        retryScope: `分支#${swipeIndex + 1}`,
-      });
-      await updatePairedSwipeBranchResult(pairId, branchId, swipeIndex, result.text, { error: false });
+      const historyPrompts = buildPairedBranchHistoryPromptsBefore(state.userMessageId);
+      const abortHandler = () => {
+        try {
+          if (typeof stopGenerationById === 'function') {
+            stopGenerationById(generationId);
+          }
+        } catch {
+          // ignore
+        }
+      };
+
+      controller.signal.addEventListener('abort', abortHandler, { once: true });
+      try {
+        beginInternalGenerateRequest();
+        const resultText = await generate({
+          generation_id: generationId,
+          user_input: String(userText || ''),
+          should_stream: false,
+          should_silence: true,
+          max_chat_history: 'all',
+          overrides: {
+            chat_history: {
+              with_depth_entries: true,
+              prompts: historyPrompts,
+            },
+          },
+        });
+        await updatePairedSwipeBranchResult(pairId, branchId, swipeIndex, resultText, { error: false });
+      } finally {
+        endInternalGenerateRequest();
+        controller.signal.removeEventListener('abort', abortHandler);
+      }
     } catch (error) {
       if (error?.name !== 'AbortError') {
         warn('并行分支生成失败:', error);
