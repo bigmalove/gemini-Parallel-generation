@@ -7023,7 +7023,7 @@
 
       const pairedState = getPairedSwipeStateByMessageId(messageId);
       const canAppendBranch = canAppendPairedSwipeBranch(messageId);
-      const shouldShowComposer = canAppendBranch || pairedSwipeComposerUserMessageId === messageId;
+      const shouldShowComposer = pairedSwipeComposerUserMessageId === messageId;
       const existingComposer = mesBlock.querySelector(`.${PAIRED_SWIPE_COMPOSER_CLASS}`);
       const preserveComposer = Boolean(existingComposer && shouldShowComposer);
 
@@ -7098,6 +7098,14 @@
       });
 
       controls.append(leftBtn, counter, rightBtn, statusText);
+      if (canAppendBranch) {
+        const branchButton = doc.createElement('button');
+        branchButton.type = 'button';
+        branchButton.className = PAIRED_SWIPE_BRANCH_BUTTON_CLASS;
+        branchButton.setAttribute('data-message-id', String(messageId));
+        branchButton.textContent = '并行分支';
+        controls.appendChild(branchButton);
+      }
       const focusComposerTextarea = (composerNode) => {
         const textarea = composerNode?.querySelector?.(`.${PAIRED_SWIPE_COMPOSER_TEXTAREA_CLASS}`);
         if (!textarea || typeof textarea.focus !== 'function') {
