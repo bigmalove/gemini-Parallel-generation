@@ -5642,7 +5642,7 @@
   function onGenerationStopped() {
     const job = activeJob;
     debug('收到 GENERATION_STOPPED', { activeJob: summarizeJob(job) });
-    if (hasInternalGenerateRequestInFlight()) {
+    if (hasInternalGenerateRequestInFlight() && !foregroundGenerationRunning) {
       debug('忽略脚本内部静默请求触发的 GENERATION_STOPPED', {
         inFlight: internalGenerateRequestInFlight,
       });
@@ -5677,7 +5677,7 @@
   function onGenerationEnded(messageId) {
     const job = activeJob;
     debug('收到 GENERATION_ENDED', { messageId, activeJob: summarizeJob(job) });
-    if (hasInternalGenerateRequestInFlight()) {
+    if (hasInternalGenerateRequestInFlight() && !foregroundGenerationRunning) {
       debug('忽略脚本内部静默请求触发的 GENERATION_ENDED', {
         messageId,
         inFlight: internalGenerateRequestInFlight,
@@ -6120,7 +6120,44 @@
       return null;
     }
 
-    return getOrCreatePairedSwipeStateFromMessages(userMessage, assistantMessage, { create: false });
+    return reconcilePairedSwipeForegroundState(
+      getOrCreatePairedSwipeStateFromMessages(userMessage, assistantMessage, { create: false }),
+    );
+  }
+
+  function reconcilePairedSwipeForegroundState(state) {
+    if (!state) {
+      return null;
+    }
+
+    const isLatestPair = isLatestPairedSwipeTarget(state.userMessageId, state.assistantMessageId);
+    const shouldForegroundBePending = Boolean(isLatestPair && foregroundGenerationRunning);
+    let changed = false;
+
+    if (state.foregroundPending !== shouldForegroundBePending) {
+      state.foregroundPending = shouldForegroundBePending;
+      changed = true;
+    }
+
+    const firstBranchId = state.branchIds[0];
+    if (firstBranchId) {
+      const currentStatus = state.statusByBranchId[firstBranchId];
+      const nextStatus = shouldForegroundBePending
+        ? 'pending'
+        : currentStatus === 'pending'
+          ? 'done'
+          : currentStatus;
+      if (nextStatus && nextStatus !== currentStatus) {
+        state.statusByBranchId[firstBranchId] = nextStatus;
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      pairedSwipeStates.set(state.pairId, state);
+    }
+
+    return state;
   }
 
   function clearPairedSwipeComposerState() {
@@ -6630,7 +6667,6 @@
     let streamUpdateTimer = null;
     let scanTimer = null;
     let streamHandlerBound = false;
-    let pairedUiHandlerBound = false;
 
     function getDoc() {
       return getHostDocument();
@@ -6875,13 +6911,6 @@
     }
 
     function bindEvents() {
-      if (!pairedUiHandlerBound) {
-        const doc = getDoc();
-        if (doc) {
-          doc.addEventListener('click', onPairedUiClick, true);
-          pairedUiHandlerBound = true;
-        }
-      }
       if (streamHandlerBound) return;
       if (typeof iframe_events === 'undefined' || !iframe_events.STREAM_TOKEN_RECEIVED_FULLY) {
         debug('旧楼层 Swipe: STREAM_TOKEN_RECEIVED_FULLY 不可用，跳过流式绑定');
@@ -7024,15 +7053,15 @@
       const pairedState = getPairedSwipeStateByMessageId(messageId);
       const canAppendBranch = canAppendPairedSwipeBranch(messageId);
       const shouldShowComposer = pairedSwipeComposerUserMessageId === messageId;
+      const existingControls = mesBlock.querySelector(`.${PAIRED_SWIPE_USER_CONTAINER_CLASS}`);
       const existingComposer = mesBlock.querySelector(`.${PAIRED_SWIPE_COMPOSER_CLASS}`);
       const preserveComposer = Boolean(existingComposer && shouldShowComposer);
-
-      mesBlock.querySelector(`.${PAIRED_SWIPE_USER_CONTAINER_CLASS}`)?.remove();
       if (!preserveComposer) {
         existingComposer?.remove();
       }
 
       if (!pairedState && !canAppendBranch) {
+        existingControls?.remove();
         return;
       }
 
@@ -7047,64 +7076,124 @@
         pairedState?.branchIds?.length || 1,
       );
       const currentSwipeId = Math.min(getCurrentSwipeIndex(userMessage), Math.max(0, swipeCount - 1));
-      const controls = doc.createElement('div');
+      const isNewControls = !existingControls;
+      const controls = existingControls || doc.createElement('div');
       controls.className = PAIRED_SWIPE_USER_CONTAINER_CLASS;
+      controls.setAttribute('data-message-id', String(messageId));
 
-      const leftBtn = doc.createElement('div');
-      leftBtn.className = 'old-floor-swipe-btn';
-      leftBtn.innerHTML = '<i class="fa-solid fa-chevron-left"></i>';
+      const getOrCreateControl = (role, tagName, className = '') => {
+        let node = controls.querySelector(`[data-role="${role}"]`);
+        if (!node) {
+          node = doc.createElement(tagName);
+          node.setAttribute('data-role', role);
+        }
+        if (node.className !== className) {
+          node.className = className;
+        }
+        return node;
+      };
+
+      const leftBtn = getOrCreateControl('paired-left', 'div', 'old-floor-swipe-btn');
+      const leftBtnHtml = '<i class="fa-solid fa-chevron-left"></i>';
+      if (leftBtn.innerHTML !== leftBtnHtml) {
+        leftBtn.innerHTML = leftBtnHtml;
+      }
       leftBtn.title = '上一分支';
 
-      const counter = doc.createElement('span');
-      counter.className = 'old-floor-swipe-counter';
-      counter.textContent = `${currentSwipeId + 1}/${Math.max(1, swipeCount)}`;
+      const counter = getOrCreateControl('paired-counter', 'span', 'old-floor-swipe-counter');
+      const counterText = `${currentSwipeId + 1}/${Math.max(1, swipeCount)}`;
+      if (counter.textContent !== counterText) {
+        counter.textContent = counterText;
+      }
 
-      const rightBtn = doc.createElement('div');
-      rightBtn.className = 'old-floor-swipe-btn';
-      rightBtn.innerHTML = '<i class="fa-solid fa-chevron-right"></i>';
+      const rightBtn = getOrCreateControl('paired-right', 'div', 'old-floor-swipe-btn');
+      const rightBtnHtml = '<i class="fa-solid fa-chevron-right"></i>';
+      if (rightBtn.innerHTML !== rightBtnHtml) {
+        rightBtn.innerHTML = rightBtnHtml;
+      }
       rightBtn.title = '下一分支';
 
-      const statusText = doc.createElement('span');
-      statusText.className = PAIRED_SWIPE_STATUS_TEXT_CLASS;
+      const statusText = getOrCreateControl('paired-status', 'span', PAIRED_SWIPE_STATUS_TEXT_CLASS);
       const statusDescriptor = getPairedSwipeStatusDescriptor(messageId);
-      statusText.textContent = statusDescriptor.text;
+      if (statusText.textContent !== statusDescriptor.text) {
+        statusText.textContent = statusDescriptor.text;
+      }
       statusText.classList.toggle(PAIRED_SWIPE_PLACEHOLDER_CLASS, statusDescriptor.isPending);
       statusText.classList.toggle(PAIRED_SWIPE_ERROR_CLASS, statusDescriptor.isError);
-
-      const updateUI = () => {
-        try {
-          scheduleScan();
-        } catch {
-          // ignore
-        }
-      };
 
       const disableSwipeButtons = !pairedState || pairedState.foregroundPending || swipeCount <= 1;
       setSwipeButtonDisabled(leftBtn, disableSwipeButtons || currentSwipeId <= 0);
       setSwipeButtonDisabled(rightBtn, disableSwipeButtons || currentSwipeId >= swipeCount - 1);
 
-      leftBtn.addEventListener('click', event => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (disableSwipeButtons || currentSwipeId <= 0) return;
-        void syncPairedSwipeIndex(messageId, currentSwipeId - 1);
-      });
+      // Store current swipe state on the controls element so click handlers
+      // always read fresh values instead of stale closure captures.
+      controls.__pairedSwipeState = {
+        messageId,
+        currentSwipeId,
+        disableSwipeButtons,
+        swipeCount,
+      };
 
-      rightBtn.addEventListener('click', event => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (disableSwipeButtons || currentSwipeId >= swipeCount - 1) return;
-        void syncPairedSwipeIndex(messageId, currentSwipeId + 1);
-      });
+      if (!leftBtn.__pairedBound) {
+        leftBtn.__pairedBound = true;
+        leftBtn.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          const s = controls.__pairedSwipeState;
+          if (!s || s.disableSwipeButtons || s.currentSwipeId <= 0) return;
+          void syncPairedSwipeIndex(s.messageId, s.currentSwipeId - 1);
+        });
+      }
 
-      controls.append(leftBtn, counter, rightBtn, statusText);
+      if (!rightBtn.__pairedBound) {
+        rightBtn.__pairedBound = true;
+        rightBtn.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          const s = controls.__pairedSwipeState;
+          if (!s || s.disableSwipeButtons || s.currentSwipeId >= s.swipeCount - 1) return;
+          void syncPairedSwipeIndex(s.messageId, s.currentSwipeId + 1);
+        });
+      }
+
+      let branchButton = controls.querySelector(`[data-role="paired-branch-button"]`);
       if (canAppendBranch) {
-        const branchButton = doc.createElement('button');
-        branchButton.type = 'button';
-        branchButton.className = PAIRED_SWIPE_BRANCH_BUTTON_CLASS;
+        if (!branchButton) {
+          branchButton = doc.createElement('button');
+          branchButton.setAttribute('data-role', 'paired-branch-button');
+          branchButton.type = 'button';
+          branchButton.className = PAIRED_SWIPE_BRANCH_BUTTON_CLASS;
+          branchButton.textContent = '并行分支';
+          branchButton.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (typeof event.stopImmediatePropagation === 'function') {
+              event.stopImmediatePropagation();
+            }
+            const mid = Number(branchButton.getAttribute('data-message-id'));
+            if (Number.isFinite(mid)) {
+              togglePairedSwipeComposer(mid);
+            }
+          });
+        }
         branchButton.setAttribute('data-message-id', String(messageId));
-        branchButton.textContent = '并行分支';
-        controls.appendChild(branchButton);
+      } else if (branchButton) {
+        branchButton.remove();
+        branchButton = null;
+      }
+
+      // Ensure all children are properly parented in the expected order.
+      // Use a lightweight check: only call append when children are missing
+      // or out of order, to avoid triggering unnecessary MutationObserver callbacks.
+      const expectedChildren = [leftBtn, counter, rightBtn, statusText];
+      if (branchButton) {
+        expectedChildren.push(branchButton);
+      }
+      const currentChildren = Array.from(controls.children);
+      const needsReorder = expectedChildren.length !== currentChildren.length
+        || expectedChildren.some((child, i) => currentChildren[i] !== child);
+      if (needsReorder) {
+        controls.append(...expectedChildren);
       }
       const focusComposerTextarea = (composerNode) => {
         const textarea = composerNode?.querySelector?.(`.${PAIRED_SWIPE_COMPOSER_TEXTAREA_CLASS}`);
@@ -7120,10 +7209,12 @@
         }, 0);
       };
 
-      mesBlock.appendChild(controls);
+      if (!existingControls) {
+        mesBlock.appendChild(controls);
+      }
 
       if (!preserveComposer && shouldShowComposer) {
-        const composer = createPairedSwipeComposer(messageId, updateUI);
+        const composer = createPairedSwipeComposer(messageId, () => scheduleScan());
         if (composer) {
           mesBlock.appendChild(composer);
           if (pairedSwipeComposerUserMessageId === messageId) {
@@ -7362,36 +7453,12 @@
       }, 50);
     }
 
-    function onPairedUiClick(event) {
-      const target = getEventTargetElement(event);
-      if (!target || typeof target.closest !== 'function') {
-        return;
-      }
-
-      const branchButton = target.closest(`.${PAIRED_SWIPE_BRANCH_BUTTON_CLASS}`);
-      if (!branchButton) {
-        return;
-      }
-
-      const rawMessageId = branchButton.getAttribute('data-message-id')
-        || branchButton.closest('.mes')?.getAttribute('mesid')
-        || '';
-      const messageId = parseInt(rawMessageId, 10);
-      if (!Number.isFinite(messageId)) {
-        return;
-      }
-
-      event.preventDefault();
-      event.stopPropagation();
-      if (typeof event.stopImmediatePropagation === 'function') {
-        event.stopImmediatePropagation();
-      }
-
+    function togglePairedSwipeComposer(messageId) {
       const doc = getDoc();
       const mesElement = doc?.querySelector(`.mes[mesid="${messageId}"]`);
       const mesBlock = mesElement?.querySelector('.mes_block');
       if (!mesBlock) {
-        return;
+        return false;
       }
 
       const existingComposer = mesBlock.querySelector(`.${PAIRED_SWIPE_COMPOSER_CLASS}`);
@@ -7399,28 +7466,32 @@
         clearPairedSwipeComposerState();
         existingComposer.remove();
         scheduleScan();
-        return;
+        return true;
       }
 
       pairedSwipeComposerUserMessageId = messageId;
       doc.querySelectorAll(`.${PAIRED_SWIPE_COMPOSER_CLASS}`).forEach(node => node.remove());
 
       const composer = createPairedSwipeComposer(messageId, () => scheduleScan());
-      if (composer) {
-        mesBlock.appendChild(composer);
-        const textarea = composer.querySelector(`.${PAIRED_SWIPE_COMPOSER_TEXTAREA_CLASS}`);
-        if (textarea && typeof textarea.focus === 'function') {
-          setTimeout(() => {
-            textarea.focus();
-            if (typeof textarea.setSelectionRange === 'function') {
-              const textLength = String(textarea.value || '').length;
-              textarea.setSelectionRange(textLength, textLength);
-            }
-          }, 0);
-        }
+      if (!composer) {
+        scheduleScan();
+        return false;
+      }
+
+      mesBlock.appendChild(composer);
+      const textarea = composer.querySelector(`.${PAIRED_SWIPE_COMPOSER_TEXTAREA_CLASS}`);
+      if (textarea && typeof textarea.focus === 'function') {
+        setTimeout(() => {
+          textarea.focus();
+          if (typeof textarea.setSelectionRange === 'function') {
+            const textLength = String(textarea.value || '').length;
+            textarea.setSelectionRange(textLength, textLength);
+          }
+        }, 0);
       }
 
       scheduleScan();
+      return true;
     }
 
     function init() {
@@ -7437,11 +7508,6 @@
       isGenerating = false;
       currentStreamingMessageId = null;
       streamHandlerBound = false;
-      if (pairedUiHandlerBound) {
-        const doc = getDoc();
-        doc?.removeEventListener('click', onPairedUiClick, true);
-        pairedUiHandlerBound = false;
-      }
       flushStreamUpdate();
       if (scanTimer) {
         clearTimeout(scanTimer);
