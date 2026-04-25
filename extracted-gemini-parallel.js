@@ -6925,6 +6925,44 @@
       return applyTavernAiOutputRegexes(text, { messageId, depth });
     }
 
+    function buildOldFloorGenerationContext(messageId) {
+      const numericMessageId = Number(messageId);
+      if (!Number.isFinite(numericMessageId) || numericMessageId <= 0) {
+        return { chatPrompts: [], userInput: '', sourceCount: 0, userMessageId: null };
+      }
+
+      const historyMsgs = getChatMessages(`0-${Math.floor(numericMessageId) - 1}`, {
+        hide_state: 'all',
+        include_swipes: true,
+      });
+      const sourceMessages = Array.isArray(historyMsgs)
+        ? historyMsgs.filter(message => message && ['system', 'assistant', 'user'].includes(message.role))
+        : [];
+
+      let userMessageIndex = -1;
+      for (let index = sourceMessages.length - 1; index >= 0; index -= 1) {
+        if (sourceMessages[index]?.role === 'user') {
+          userMessageIndex = index;
+          break;
+        }
+      }
+
+      const historyMessages = userMessageIndex >= 0
+        ? sourceMessages.slice(0, userMessageIndex)
+        : sourceMessages;
+      const userMessage = userMessageIndex >= 0 ? sourceMessages[userMessageIndex] : null;
+
+      return {
+        chatPrompts: historyMessages.map(message => ({
+          role: message.role,
+          content: getMessageActiveText(message),
+        })),
+        userInput: userMessage ? getMessageActiveText(userMessage) : '',
+        sourceCount: sourceMessages.length,
+        userMessageId: Number.isFinite(Number(userMessage?.message_id)) ? Number(userMessage.message_id) : null,
+      };
+    }
+
     function setSwipeButtonDisabled(button, disabled) {
       if (!button) return;
       button.classList.toggle('is-disabled', Boolean(disabled));
@@ -7318,21 +7356,22 @@
         currentStreamingMessageId = messageId;
         bindEvents();
 
-        let chatPrompts = [];
-        if (messageId > 0) {
-          const historyMsgs = getChatMessages(`0-${messageId - 1}`);
-          chatPrompts = historyMsgs.map(message => ({
-            role: message.role,
-            content: message.message,
-          }));
-        }
+        const oldFloorContext = buildOldFloorGenerationContext(messageId);
+        debug('旧楼层 Swipe: 构造生成上下文', {
+          targetMessageId: messageId,
+          sourceCount: oldFloorContext.sourceCount,
+          chatPromptCount: oldFloorContext.chatPrompts.length,
+          userMessageId: oldFloorContext.userMessageId,
+          hasUserInput: oldFloorContext.userInput.length > 0,
+        });
 
         const result = await generate({
+          user_input: oldFloorContext.userInput,
           should_stream: true,
           overrides: {
             chat_history: {
               with_depth_entries: true,
-              prompts: chatPrompts,
+              prompts: oldFloorContext.chatPrompts,
             },
           },
         });
