@@ -6963,6 +6963,31 @@
       };
     }
 
+    function buildOldFloorOrderedPrompts(oldFloorContext) {
+      const chatPrompts = oldFloorContext.chatPrompts.slice();
+      if (oldFloorContext.userInput) {
+        chatPrompts.push({ role: 'user', content: oldFloorContext.userInput });
+      }
+
+      const orderedPrompts = [];
+      let insertedChat = false;
+      for (const prompt of builtin_prompt_default_order) {
+        if (prompt === 'chat_history') {
+          orderedPrompts.push(...chatPrompts);
+          insertedChat = true;
+          continue;
+        }
+        if (prompt === 'user_input') {
+          continue;
+        }
+        orderedPrompts.push(prompt);
+      }
+      if (!insertedChat) {
+        orderedPrompts.push(...chatPrompts);
+      }
+      return orderedPrompts;
+    }
+
     function setSwipeButtonDisabled(button, disabled) {
       if (!button) return;
       button.classList.toggle('is-disabled', Boolean(disabled));
@@ -7365,15 +7390,14 @@
           hasUserInput: oldFloorContext.userInput.length > 0,
         });
 
-        const result = await generate({
-          user_input: oldFloorContext.userInput,
+        if (typeof generateRaw !== 'function') {
+          throw new Error('generateRaw 不可用，无法严格截断旧楼层上下文');
+        }
+
+        const result = await generateRaw({
           should_stream: true,
-          overrides: {
-            chat_history: {
-              with_depth_entries: true,
-              prompts: oldFloorContext.chatPrompts,
-            },
-          },
+          max_chat_history: 0,
+          ordered_prompts: buildOldFloorOrderedPrompts(oldFloorContext),
         });
 
         flushStreamUpdate();
