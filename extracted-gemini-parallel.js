@@ -5814,7 +5814,7 @@
     }
 
     const historyMessages = getChatMessages(`0-${Math.floor(numericMessageId) - 1}`, {
-      hide_state: 'all',
+      hide_state: 'unhidden',
       include_swipes: true,
     });
     if (!Array.isArray(historyMessages) || historyMessages.length === 0) {
@@ -6932,7 +6932,7 @@
       }
 
       const historyMsgs = getChatMessages(`0-${Math.floor(numericMessageId) - 1}`, {
-        hide_state: 'all',
+        hide_state: 'unhidden',
         include_swipes: true,
       });
       const sourceMessages = Array.isArray(historyMsgs)
